@@ -13,6 +13,7 @@ Custom Hubitat Elevation drivers and their companion PC-side bridges.
 ## Working rules
 
 - **Official documentation first.** Before proposing an experiment, a workaround, or a theory about why something fails, find and read the primary source: the vendor's documentation (Hubitat docs2, Google Home developer docs, Microsoft Learn, a project's own README or source). Quote it. If the answer is not already in `docs/research/`, run a research pass and save the findings there. Experiments come after the docs, to confirm what they say, never to explore in their place. Anything not backed by a document is labelled as inference.
+- **The Hubitat community forum is a primary source for this repo.** Hubitat's docs leave much undocumented (the async response object, the Google Home capability mapping, how helpers are installed); the answers usually exist at https://community.hubitat.com, often from Hubitat staff or well-known driver authors. Search it in every research pass. Read a thread as JSON with `https://community.hubitat.com/t/<topic-id>.json` when the HTML is heavy. Weight staff posts and posts that report a confirmed fix over speculation, and cite the thread URL.
 - **Verify what agents report.** A subagent's summary can contradict the facts in its own findings file (one recommended UDP for a port the docs call TCP). Read the findings, not just the summary, before acting on them.
 
 ## Agent skills
