@@ -15,8 +15,8 @@
  * Import URL: https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy
  *
  * Behaviour:
- * - connectionState goes offline when the Bridge cannot be reached, like a
- *   bulb with no power; switch and level keep their last known values.
+ * - The connectionState data value goes offline when the Bridge cannot be reached, like
+ *   a bulb with no power; switch and level keep their last known values.
  * - Attribute events are emitted only after the Bridge confirms a request,
  *   from the state carried in its reply. Nothing is assumed optimistically.
  * - Transition times (setLevel duration, setColorTemperature transitionTime)
@@ -29,9 +29,12 @@
  *   only hardware-shaped value is the 1-7 step passed through by
  *   setColorTempStep.
  *
- * Version: 0.0.3 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
+ * Version: 0.0.4 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
  *
  * Changelog:
+ * 2026-09-04 0.0.4 - Google Home typing test: attribute set reduced to the CT bulb's (switch,
+ *                    level, colorTemperature, colorName); connectionState kept as a data value;
+ *                    stale colorMode/connectionState attributes purged on save (issue #21)
  * 2026-09-04 0.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
  *                    as a plain dimmer with no colour-temperature control; Initialize stays out
  *                    (issue #21)
@@ -50,11 +53,9 @@ metadata {
         capability "Switch"
         capability "SwitchLevel"
         capability "ColorTemperature"
-        capability "ColorMode"
         capability "Bulb"
         capability "Refresh"
 
-        attribute "connectionState", "enum", ["unknown", "online", "offline"]
 
         command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware colour temperature step, 1 (warm) to 7 (cool)"]]
     }
@@ -78,8 +79,7 @@ metadata {
 
 void installed() {
     log.info "installed..."
-    sendEvent(name: "connectionState", value: "unknown", descriptionText: "${device.displayName} connectionState is unknown")
-    sendEvent(name: "colorMode", value: "CT", descriptionText: "${device.displayName} colorMode is CT")
+    device.updateDataValue("connectionState", "unknown")
     initialize()
 }
 
@@ -94,6 +94,7 @@ void updated() {
     log.warn "color pre-staging is: ${colorStaging == true}"
     log.warn "debug logging is: ${logEnable == true}"
     log.warn "description logging is: ${txtEnable == true}"
+    purgeStaleAttributes()
     unschedule()
     schedulePoll()
     if (logEnable) runIn(1800, "logsOff")
@@ -104,6 +105,21 @@ void updated() {
 void initialize() {
     logDebug "initialize()"
     runIn(10, "refresh")
+}
+
+// Google Home types a device by its attribute set, and attribute values outlive the driver
+// that created them, so remove the ones this version no longer declares.
+private void purgeStaleAttributes() {
+    ["colorMode", "connectionState"].each { String name ->
+        try {
+            if (device.currentValue(name, true) != null) {
+                device.deleteCurrentState(name)
+                logDebug "removed stale attribute ${name}"
+            }
+        } catch (Exception e) {
+            logDebug "could not remove attribute ${name}: ${e.message}"
+        }
+    }
 }
 
 void logsOff() {
@@ -340,7 +356,7 @@ private Map parseReply(resp) {
 // State and events
 // ---------------------------------------------------------------------------
 
-// Emits switch, level, colorTemperature, colorName and colorMode from the
+// Emits switch, level, colorTemperature and colorName from the
 // Bridge's state. Wording follows Hubitat's example drivers: "is" when the
 // value is unchanged, "was turned" / "was set to" when it changed.
 private void applyState(Map halo, Map data) {
@@ -390,10 +406,6 @@ private void applyState(Map halo, Map data) {
         }
     }
 
-    if (device.currentValue("colorMode") != "CT") {
-        emitEvent("colorMode", "CT", null, "${name} colorMode is CT", true)
-    }
-
 }
 
 private void emitEvent(String name, value, String unit, String descriptionText, Boolean changed) {
@@ -410,11 +422,13 @@ private void emitEvent(String name, value, String unit, String descriptionText, 
 // Offline is how a MoonHalo whose PC is powered down is shown. The warning
 // is logged once, on the transition; repeats go to debug. switch and level
 // are never touched here.
+// Connection state is kept as a device data value (shown under "Data" on the device page)
+// rather than an attribute while the Google Home typing is being settled: Google Home types a
+// device by its attribute set and rejects sets it does not recognise.
 private void markOffline(String reason) {
-    String current = device.currentValue("connectionState", true)
+    String current = device.getDataValue("connectionState")
     if (current != "offline") {
-        String descriptionText = "${device.displayName} connectionState was set to offline"
-        sendEvent(name: "connectionState", value: "offline", descriptionText: descriptionText)
+        device.updateDataValue("connectionState", "offline")
         log.warn "${device.displayName}: Bridge offline (${reason})"
     } else {
         logDebug "Bridge still offline (${reason})"
@@ -422,10 +436,9 @@ private void markOffline(String reason) {
 }
 
 private void markOnline() {
-    String current = device.currentValue("connectionState", true)
+    String current = device.getDataValue("connectionState")
     if (current != "online") {
-        String descriptionText = "${device.displayName} connectionState was set to online"
-        sendEvent(name: "connectionState", value: "online", descriptionText: descriptionText)
+        device.updateDataValue("connectionState", "online")
         log.info "${device.displayName}: Bridge online"
     }
 }
