@@ -6,6 +6,7 @@ ticket's testing decisions, so no Windows API call happens in these tests.
 import argparse
 import io
 import unittest
+from pathlib import Path
 
 from moonhalo_bridge.cli import (
     build_parser,
@@ -63,6 +64,22 @@ class TestBuildParser(unittest.TestCase):
         self.assertEqual(args.command, "write")
         self.assertEqual(args.code, 0xD7)
         self.assertEqual(args.value, 544)
+
+    def test_parses_serve_with_no_config(self):
+        # Argument parsing only: main() would block on app.run(), so it is
+        # not exercised here. The HTTP behaviour itself is covered by
+        # test_http.py through create_app() directly.
+        parser = build_parser()
+        args = parser.parse_args(["--dry-run", "serve"])
+        self.assertTrue(args.dry_run)
+        self.assertEqual(args.command, "serve")
+        self.assertIsNone(args.config)
+
+    def test_parses_serve_with_config_path(self):
+        parser = build_parser()
+        args = parser.parse_args(["serve", "--config", "custom-config.json"])
+        self.assertEqual(args.command, "serve")
+        self.assertEqual(args.config, Path("custom-config.json"))
 
 
 class TestDryRunMonitors(unittest.TestCase):
