@@ -10,7 +10,15 @@ from pathlib import Path
 from moonhalo_bridge.config import Config
 from moonhalo_bridge.ddc import DdcError, FakeDdcPort
 from moonhalo_bridge.http import create_app
-from moonhalo_bridge.model import POWER_OFF_VALUE, POWER_ON_VALUE, VCP_POWER, MoonHaloModel
+from moonhalo_bridge.model import (
+    POWER_OFF_VALUE,
+    POWER_ON_VALUE,
+    VCP_D9,
+    VCP_POWER,
+    MoonHaloModel,
+    level_to_brightness_step,
+    pack_d9,
+)
 
 
 def make_config(tmp_dir: Path, **overrides) -> Config:
@@ -72,19 +80,30 @@ class TestMoonHaloOn(HttpTestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["state"]["power"], "on")
         self.assertEqual(body["state"]["level"], self.config.default_on_level)
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE)])
+        expected_d9 = pack_d9(
+            self.config.default_colortemp_step, level_to_brightness_step(self.config.default_on_level)
+        )
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_valid_level_1(self):
         response = self.client.get("/moonhalo/on?level=1")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["state"]["level"], 1)
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE)])
+        expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(1))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_valid_level_100(self):
         response = self.client.get("/moonhalo/on?level=100")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["state"]["level"], 100)
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE)])
+        expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(100))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+
+    def test_on_with_level_70_uses_step_7(self):
+        response = self.client.get("/moonhalo/on?level=70")
+        self.assertEqual(response.status_code, 200)
+        expected_d9 = pack_d9(self.config.default_colortemp_step, 7)
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_level_0_rejected(self):
         response = self.client.get("/moonhalo/on?level=0")
@@ -106,6 +125,12 @@ class TestMoonHaloOn(HttpTestCase):
         self.assertFalse(response.get_json()["ok"])
         self.assertEqual(self.port.writes, [])
 
+    def test_on_after_off_restores_last_level(self):
+        self.client.get("/moonhalo/on?level=70")
+        self.client.get("/moonhalo/off")
+        response = self.client.get("/moonhalo/on")
+        self.assertEqual(response.get_json()["state"]["level"], 70)
+
 
 class TestMoonHaloOff(HttpTestCase):
     def test_off_writes_power_off_only(self):
@@ -116,6 +141,76 @@ class TestMoonHaloOff(HttpTestCase):
         self.assertEqual(body["state"]["power"], "off")
         self.assertEqual(body["state"]["level"], 0)
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+
+
+class TestMoonHaloBrightness(HttpTestCase):
+    def test_brightness_1_50_100_write_expected_low_byte(self):
+        # establish a remembered colour step distinct from the default
+        self.client.get("/moonhalo/on?level=50")
+        self.port.writes.clear()
+        colour_step = self.config.default_colortemp_step
+
+        for level, expected_step in ((1, 1), (50, 5), (100, 10)):
+            self.port.writes.clear()
+            response = self.client.get(f"/moonhalo/brightness/{level}")
+            self.assertEqual(response.status_code, 200)
+            body = response.get_json()
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["state"]["brightnessStep"], expected_step)
+            expected_d9 = pack_d9(colour_step, expected_step)
+            self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
+
+    def test_brightness_0_behaves_as_off(self):
+        self.client.get("/moonhalo/on?level=50")
+        self.port.writes.clear()
+        response = self.client.get("/moonhalo/brightness/0")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["state"]["power"], "off")
+        self.assertEqual(body["state"]["level"], 0)
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+
+    def test_brightness_while_off_writes_power_on_then_d9_in_order(self):
+        self.client.get("/moonhalo/off")
+        self.port.writes.clear()
+        response = self.client.get("/moonhalo/brightness/50")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.port.writes), 2)
+        self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
+        self.assertEqual(self.port.writes[1][0], VCP_D9)
+
+    def test_no_remembered_colour_step_reads_d9_and_preserves_high_byte(self):
+        self.port.registers[VCP_D9] = (0x0305, 0x070A)  # high byte 3
+        response = self.client.get("/moonhalo/brightness/50")
+        body = response.get_json()
+        self.assertEqual(body["state"]["colorTempStep"], 3)
+        expected_d9 = pack_d9(3, level_to_brightness_step(50))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+
+    def test_failing_read_falls_back_to_default_colour_step(self):
+        self.port.fail_reads[VCP_D9] = 3  # exhaust every retry
+        response = self.client.get("/moonhalo/brightness/50")
+        body = response.get_json()
+        self.assertEqual(body["state"]["colorTempStep"], self.config.default_colortemp_step)
+
+    def test_value_101_rejected(self):
+        response = self.client.get("/moonhalo/brightness/101")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+        self.assertEqual(self.port.writes, [])
+
+    def test_value_negative_one_rejected(self):
+        response = self.client.get("/moonhalo/brightness/-1")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+        self.assertEqual(self.port.writes, [])
+
+    def test_value_non_numeric_rejected(self):
+        response = self.client.get("/moonhalo/brightness/abc")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+        self.assertEqual(self.port.writes, [])
 
 
 class TestMoonHaloStatus(HttpTestCase):
@@ -169,6 +264,51 @@ class TestDdcFailure(HttpTestCase):
 
         status = self.client.get("/moonhalo/status").get_json()
         self.assertEqual(status["state"]["power"], "unknown")
+
+    def test_brightness_failure_returns_500(self):
+        response = self.client.get("/moonhalo/brightness/50")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertIn("simulated hardware failure", body["error"])
+
+
+class TestBrightnessLogging(HttpTestCase):
+    """The log line for /moonhalo/brightness reports the writes the model
+    actually performed, not a fixed constant."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort()
+        self.config = make_config(self.tmp_dir, log_file=self.tmp_dir / "bridge.log")
+        self.model = MoonHaloModel(self.port, self.config)
+        self.app = create_app(self.model, self.config)
+        self.app.testing = True
+        self.client = self.app.test_client()
+        # The FileHandler keeps `bridge.log` open; close it before the
+        # TemporaryDirectory cleanup tries to delete the file (Windows).
+        self.addCleanup(self._close_log_handlers)
+
+    def _close_log_handlers(self) -> None:
+        import logging
+
+        logger = logging.getLogger(f"moonhalo_bridge.http.{id(self.config)}")
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+
+    def test_log_line_contains_the_real_writes(self):
+        response = self.client.get("/moonhalo/brightness/50")
+        self.assertEqual(response.status_code, 200)
+
+        log_text = self.config.log_file.read_text(encoding="utf-8")
+        lines = [line for line in log_text.splitlines() if "/moonhalo/brightness" in line]
+        self.assertEqual(len(lines), 1)
+        expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(50))
+        self.assertIn(str((VCP_POWER, POWER_ON_VALUE)), lines[0])
+        self.assertIn(str((VCP_D9, expected_d9)), lines[0])
 
 
 if __name__ == "__main__":

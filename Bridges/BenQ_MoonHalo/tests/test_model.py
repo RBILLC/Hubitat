@@ -17,9 +17,13 @@ from moonhalo_bridge.ddc import DdcError, FakeDdcPort
 from moonhalo_bridge.model import (
     POWER_OFF_VALUE,
     POWER_ON_VALUE,
+    VCP_D9,
     VCP_POWER,
     MoonHaloModel,
+    brightness_step_to_level,
     colortemp_step_to_kelvin,
+    level_to_brightness_step,
+    pack_d9,
 )
 
 
@@ -103,6 +107,31 @@ class TestColortempStepToKelvin(unittest.TestCase):
             colortemp_step_to_kelvin(8, 2700, 6500)
 
 
+class TestBrightnessScaling(unittest.TestCase):
+    def test_level_to_brightness_step_reference_points(self):
+        self.assertEqual(level_to_brightness_step(1), 1)
+        self.assertEqual(level_to_brightness_step(50), 5)
+        self.assertEqual(level_to_brightness_step(100), 10)
+
+    def test_brightness_step_to_level_reference_points(self):
+        self.assertEqual(brightness_step_to_level(1), 1)
+        self.assertEqual(brightness_step_to_level(10), 100)
+
+    def test_round_trip_is_monotonic(self):
+        levels = list(range(1, 101))
+        round_tripped = [brightness_step_to_level(level_to_brightness_step(level)) for level in levels]
+        self.assertEqual(round_tripped, sorted(round_tripped))
+
+    def test_round_trip_exact_at_endpoints(self):
+        self.assertEqual(brightness_step_to_level(level_to_brightness_step(1)), 1)
+        self.assertEqual(brightness_step_to_level(level_to_brightness_step(100)), 100)
+
+    def test_pack_d9_high_and_low_bytes(self):
+        self.assertEqual(pack_d9(4, 5), 0x0405)
+        self.assertEqual(pack_d9(1, 1), 0x0101)
+        self.assertEqual(pack_d9(7, 10), 0x070A)
+
+
 class TestMoonHaloModelPower(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -112,21 +141,30 @@ class TestMoonHaloModelPower(unittest.TestCase):
         self.config = make_config(self.tmp_dir)
         self.model = MoonHaloModel(self.port, self.config)
 
-    def test_turn_on_writes_exactly_power_on(self):
+    def test_turn_on_writes_power_then_d9(self):
+        # No remembered colour step and an empty register: the D9 read
+        # fails after retries, so the default colour step (4) is used.
         state = self.model.turn_on()
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE)])
+        expected_brightness_step = level_to_brightness_step(self.config.default_on_level)
+        expected_d9 = pack_d9(self.config.default_colortemp_step, expected_brightness_step)
+        self.assertEqual(
+            self.port.writes,
+            [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)],
+        )
         self.assertEqual(state["power"], "on")
         self.assertEqual(state["level"], self.config.default_on_level)
 
     def test_turn_on_with_level_records_that_level(self):
         state = self.model.turn_on(70)
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE)])
+        expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(70))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
         self.assertEqual(state["level"], 70)
 
     def test_turn_off_writes_exactly_power_off(self):
         self.model.turn_on(70)
+        writes_before_off = list(self.port.writes)
         state = self.model.turn_off()
-        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_POWER, POWER_OFF_VALUE)])
+        self.assertEqual(self.port.writes, writes_before_off + [(VCP_POWER, POWER_OFF_VALUE)])
         self.assertEqual(state["power"], "off")
         self.assertEqual(state["level"], 0)
 
@@ -153,6 +191,76 @@ class TestMoonHaloModelPower(unittest.TestCase):
         port = NoMonitorsPort()
         model = MoonHaloModel(port, make_config(self.tmp_dir, state_file=self.tmp_dir / "state2.json"))
         self.assertEqual(model.status()["monitor"], "unknown")
+
+
+class TestMoonHaloModelSetLevel(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort()
+        self.config = make_config(self.tmp_dir)
+        self.model = MoonHaloModel(self.port, self.config)
+
+    def test_brightness_1_50_100_keep_remembered_colour_step(self):
+        self.model.turn_on(50)  # establishes power "on" and a remembered colour step
+        remembered_colour_step = self.port.registers[VCP_D9][0] >> 8
+        self.port.writes.clear()
+
+        for level, expected_step in ((1, 1), (50, 5), (100, 10)):
+            self.port.writes.clear()
+            state = self.model.set_level(level)
+            expected_d9 = pack_d9(remembered_colour_step, expected_step)
+            self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
+            self.assertEqual(state["brightnessStep"], expected_step)
+
+    def test_brightness_0_writes_only_power_off(self):
+        self.model.turn_on(50)
+        self.port.writes.clear()
+        state = self.model.set_level(0)
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+        self.assertEqual(state["power"], "off")
+        self.assertEqual(state["level"], 0)
+
+    def test_brightness_while_off_writes_power_on_then_d9_in_order(self):
+        self.model.turn_off()
+        self.port.writes.clear()
+        self.model.set_level(50)
+        self.assertEqual(len(self.port.writes), 2)
+        self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
+        self.assertEqual(self.port.writes[1][0], VCP_D9)
+
+    def test_no_remembered_colour_step_reads_d9_and_preserves_high_byte(self):
+        self.port.registers[VCP_D9] = (0x0305, 0x070A)  # high byte 3
+        state = self.model.set_level(50)
+        self.assertEqual(state["colorTempStep"], 3)
+        expected_d9 = pack_d9(3, level_to_brightness_step(50))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+
+    def test_failing_read_falls_back_to_default_colour_step_and_warns(self):
+        self.port.fail_reads[VCP_D9] = 3  # exhaust every retry
+        with self.assertLogs(level="WARNING") as logs:
+            state = self.model.set_level(50)
+        self.assertEqual(state["colorTempStep"], self.config.default_colortemp_step)
+        self.assertTrue(any("colour step" in message for message in logs.output))
+
+    def test_on_with_level_query_writes_power_then_d9_with_step(self):
+        state = self.model.turn_on(70)
+        expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(70))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+        self.assertEqual(state["level"], 70)
+
+    def test_on_after_off_restores_last_level(self):
+        self.model.turn_on(70)
+        self.model.turn_off()
+        state = self.model.turn_on()
+        self.assertEqual(state["level"], 70)
+
+    def test_last_writes_recorded_for_brightness(self):
+        self.model.turn_on(50)
+        self.port.writes.clear()
+        self.model.set_level(80)
+        self.assertEqual(self.model.last_writes, self.port.writes)
 
 
 class RaisingDdcPort(FakeDdcPort):
