@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request
 
 from .config import Config
 from .ddc import DdcError
-from .model import MoonHaloModel
+from .model import MoonHaloModel, kelvin_to_colortemp_step
 
 #: Writes a call to /moonhalo/status (or /health) always produces: none.
 NO_WRITES: list[tuple[int, int]] = []
@@ -71,6 +71,28 @@ def _parse_brightness(raw: str) -> int:
     return value
 
 
+def _parse_colortemp(raw: str, kelvin_min: int, kelvin_max: int, invert: bool) -> int:
+    """Validate the `/moonhalo/colortemp/<value>` path segment: an integer
+    1-7 is taken as the hardware step directly; an integer >= 1000 is
+    Kelvin, converted to a step with `kelvin_to_colortemp_step`; anything
+    else (0, 8-999, negative) is invalid. `<value>` is captured as a plain
+    string (not Flask's `<int:...>` converter) so a non-numeric value gets
+    a 400, not a 404. Raises ValueError, with a message fit for a 400
+    body, otherwise.
+    """
+    try:
+        parsed = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"colortemp must be an integer 1-7 (step) or >= 1000 (Kelvin), got {raw!r}"
+        ) from None
+    if 1 <= parsed <= 7:
+        return parsed
+    if parsed >= 1000:
+        return kelvin_to_colortemp_step(parsed, kelvin_min, kelvin_max, invert)
+    raise ValueError(f"colortemp must be 1-7 (step) or >= 1000 (Kelvin), got {parsed}")
+
+
 def create_app(model: MoonHaloModel, config: Config) -> Flask:
     """Build the Flask app wiring GET endpoints to `model`."""
     app = Flask(__name__)
@@ -122,6 +144,25 @@ def create_app(model: MoonHaloModel, config: Config) -> Flask:
 
         try:
             state = model.set_level(level)
+        except DdcError as error:
+            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 500
+
+        _log_request(logger, endpoint, model.last_writes, "ok")
+        return jsonify({"ok": True, "state": state}), 200
+
+    @app.get("/moonhalo/colortemp/<value>")
+    def moonhalo_colortemp(value: str):
+        endpoint = "/moonhalo/colortemp"
+        try:
+            step = _parse_colortemp(value, config.kelvin_min, config.kelvin_max, config.invert_colortemp)
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
+        stage = request.args.get("stage") == "1"
+        try:
+            state = model.set_colortemp(step, stage=stage)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500

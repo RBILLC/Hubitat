@@ -53,17 +53,42 @@ class MoonHaloState:
         )
 
 
-def colortemp_step_to_kelvin(step: int, kelvin_min: int, kelvin_max: int) -> int:
+def colortemp_step_to_kelvin(
+    step: int, kelvin_min: int, kelvin_max: int, invert: bool = False
+) -> int:
     """Centre Kelvin of colour step `step` (1-7, 1 warmest) when
-    `kelvin_min..kelvin_max` is divided into seven equal bands. A pure
-    function so later tickets (Kelvin -> nearest step) can reuse the same
-    band maths.
+    `kelvin_min..kelvin_max` is divided into seven equal bands. With
+    `invert`, the step is flipped (`8 - step`) before the band is looked
+    up, so this stays the inverse of `kelvin_to_colortemp_step` called
+    with the same `invert`.
     """
     if not 1 <= step <= 7:
         raise ValueError(f"colour step must be 1-7, got {step}")
+    effective_step = 8 - step if invert else step
     band_width = (kelvin_max - kelvin_min) / 7
-    centre = kelvin_min + band_width * (step - 1) + band_width / 2
+    centre = kelvin_min + band_width * (effective_step - 1) + band_width / 2
     return round(centre)
+
+
+def kelvin_to_colortemp_step(
+    kelvin: int, kelvin_min: int, kelvin_max: int, invert: bool = False
+) -> int:
+    """Map a Kelvin value to the hardware colour step (1-7, 1 warmest) whose
+    band it falls in, dividing `kelvin_min..kelvin_max` into seven equal
+    bands. `kelvin` is clamped into the range first, so anything at or
+    below `kelvin_min` is step 1 and anything at or above `kelvin_max` is
+    step 7; this never returns 0 or 8. With `invert`, the step is flipped
+    (`8 - step`) after the band lookup, so `colortemp_step_to_kelvin(step,
+    ..., invert=invert)` maps back into the same band for every step 1-7.
+    """
+    clamped = max(kelvin_min, min(kelvin_max, kelvin))
+    band_width = (kelvin_max - kelvin_min) / 7
+    if band_width <= 0:
+        step = 1
+    else:
+        step = int((clamped - kelvin_min) / band_width) + 1
+        step = max(1, min(7, step))
+    return 8 - step if invert else step
 
 
 def level_to_brightness_step(level: int) -> int:
@@ -184,10 +209,7 @@ class MoonHaloModel:
         """Shared body of `turn_on` and `set_level` once a concrete level
         1-100 is known. Caller holds `self._lock`."""
         writes: list[tuple[int, int]] = []
-        if self._state.power != "on":
-            self._port.write_vcp(VCP_POWER, POWER_ON_VALUE)
-            writes.append((VCP_POWER, POWER_ON_VALUE))
-            self._state.power = "on"
+        self._ensure_power_on_locked(writes)
 
         brightness_step = level_to_brightness_step(level)
         colortemp_step = self._resolve_colortemp_step_locked()
@@ -202,27 +224,102 @@ class MoonHaloModel:
         self._save_state()
         return self._status_locked()
 
+    def set_colortemp(self, step: int, stage: bool = False) -> dict[str, Any]:
+        """Set MoonHalo colour temperature to hardware step `step` (1-7).
+
+        If `stage` is true, only the remembered `colortemp_step` changes:
+        no DDC writes happen and the halo's power is untouched. Otherwise,
+        powers on first if not already on, then writes D9 with `step` and
+        the brightness step to keep (see `_resolve_brightness_step_locked`),
+        remembering both steps. If `last_level` was not yet known, it is
+        derived from the brightness step kept.
+        """
+        with self._lock:
+            if stage:
+                self._state.colortemp_step = step
+                self.last_writes = []
+                self._save_state()
+                return self._status_locked()
+
+            writes: list[tuple[int, int]] = []
+            self._ensure_power_on_locked(writes)
+
+            brightness_step = self._resolve_brightness_step_locked()
+            d9_value = pack_d9(step, brightness_step)
+            self._port.write_vcp(VCP_D9, d9_value)
+            writes.append((VCP_D9, d9_value))
+
+            self._state.colortemp_step = step
+            self._state.brightness_step = brightness_step
+            if self._state.last_level is None:
+                self._state.last_level = brightness_step_to_level(brightness_step)
+            self.last_writes = writes
+            self._save_state()
+            return self._status_locked()
+
+    def _ensure_power_on_locked(self, writes: list[tuple[int, int]]) -> None:
+        """Write D7 On and remember power "on" if not already on, appending
+        the write to `writes`. Caller holds `self._lock`."""
+        if self._state.power != "on":
+            self._port.write_vcp(VCP_POWER, POWER_ON_VALUE)
+            writes.append((VCP_POWER, POWER_ON_VALUE))
+            self._state.power = "on"
+
     def _resolve_colortemp_step_locked(self) -> int:
         """The colour step to keep when writing D9 for a brightness-only
-        change: the remembered step; else the high byte of a fresh D9 read
-        (clamped to 1-7, or the configured default if that high byte is 0,
-        i.e. unknown); else, if the read fails after retries, the configured
-        default (with a warning logged)."""
-        if self._state.colortemp_step is not None:
-            return self._state.colortemp_step
+        change: the remembered step, else read from the monitor (see
+        `_resolve_d9_half_locked`)."""
+        return self._resolve_d9_half_locked(
+            self._state.colortemp_step,
+            is_high_byte=True,
+            value_max=7,
+            default=self._config.default_colortemp_step,
+            label="colour step",
+        )
+
+    def _resolve_brightness_step_locked(self) -> int:
+        """The brightness step to keep when writing D9 for a colour-only
+        change: the remembered step, else read from the monitor (see
+        `_resolve_d9_half_locked`)."""
+        return self._resolve_d9_half_locked(
+            self._state.brightness_step,
+            is_high_byte=False,
+            value_max=10,
+            default=self._config.default_brightness_step,
+            label="brightness step",
+        )
+
+    def _resolve_d9_half_locked(
+        self,
+        remembered: Optional[int],
+        *,
+        is_high_byte: bool,
+        value_max: int,
+        default: int,
+        label: str,
+    ) -> int:
+        """The value to keep for one half of D9 (colour step in the high
+        byte, brightness step in the low byte) when the other half is
+        being written: `remembered` if not None; else the relevant byte of
+        a fresh D9 read (clamped to `1..value_max`, or `default` if that
+        byte is 0, i.e. unknown); else, if the read fails after retries,
+        `default` (with a warning logged, naming the half by `label`)."""
+        if remembered is not None:
+            return remembered
         try:
             current, _maximum = self._port.read_vcp(VCP_D9)
         except DdcError as error:
             _logger.warning(
-                "D9 read failed after retries (%s); using default colour step %d",
+                "D9 read failed after retries (%s); using default %s %d",
                 error,
-                self._config.default_colortemp_step,
+                label,
+                default,
             )
-            return self._config.default_colortemp_step
-        high_byte = (current >> 8) & 0xFF
-        if high_byte == 0:
-            return self._config.default_colortemp_step
-        return max(1, min(7, high_byte))
+            return default
+        raw_byte = (current >> 8) & 0xFF if is_high_byte else current & 0xFF
+        if raw_byte == 0:
+            return default
+        return max(1, min(value_max, raw_byte))
 
     def status(self) -> dict[str, Any]:
         """Return the remembered state; performs no DDC call."""
@@ -254,7 +351,10 @@ class MoonHaloModel:
             "brightnessStep": brightness_step,
             "colorTempStep": colortemp_step,
             "colorTemperature": colortemp_step_to_kelvin(
-                colortemp_step, self._config.kelvin_min, self._config.kelvin_max
+                colortemp_step,
+                self._config.kelvin_min,
+                self._config.kelvin_max,
+                self._config.invert_colortemp,
             ),
             "monitor": self._monitor_description,
         }
