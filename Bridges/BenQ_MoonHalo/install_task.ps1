@@ -8,8 +8,9 @@
     run-time limit. The Bridge must run in your interactive session because the monitor API it
     uses is not available to Windows services (session 0); see the README.
 
-    The task runs pyw.exe (the windowless Python launcher) directly, with this folder as the
-    working directory, so no console window ever appears. Creating a Scheduled Task needs
+    The task runs pythonw.exe (the windowless Python interpreter) directly, with this folder as
+    the working directory, so no console window ever appears and Task Scheduler supervises the
+    Bridge process itself. Creating a Scheduled Task needs
     administrator rights, so the script re-launches itself elevated if necessary and passes your
     account name through so the task still runs as you. The account is named in DOMAIN\user form
     (for example RBILLC\RBILLC), which Task Scheduler requires for Microsoft-account logins. If
@@ -77,8 +78,13 @@ if (-not (Test-Path $launcher)) { throw "Launcher not found: $launcher" }
 if (-not (Test-Path (Join-Path $PSScriptRoot "config.json"))) {
     Write-Warning "No config.json next to the launcher. Copy config.example.json to config.json and edit it, or the Bridge will start with defaults and an open allowlist."
 }
-$pyw = Get-Command pyw.exe -ErrorAction SilentlyContinue
-if (-not $pyw) { throw "pyw.exe (the windowless Python launcher) was not found on PATH. Install Python from python.org with the launcher option." }
+# Run pythonw.exe itself, not the pyw launcher: the launcher exits as soon as it has spawned
+# Python, which makes Task Scheduler treat the task as finished (no restart on failure, and
+# stopping the task would not stop the Bridge). pythonw.exe sits next to python.exe.
+$pythonExe = & py -c "import sys; print(sys.executable)" 2>$null
+if (-not $pythonExe) { throw "Python was not found through the py launcher. Install Python from python.org with the launcher option." }
+$pythonw = Join-Path (Split-Path $pythonExe) "pythonw.exe"
+if (-not (Test-Path $pythonw)) { throw "pythonw.exe was not found next to $pythonExe." }
 
 if ($existing) {
     # Stop the previous instance so the new registration can start cleanly on the port.
@@ -88,11 +94,11 @@ if ($existing) {
 
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 try {
-    $action    = New-ScheduledTaskAction -Execute $pyw.Source -Argument "-m moonhalo_bridge serve" -WorkingDirectory $PSScriptRoot
+    $action    = New-ScheduledTaskAction -Execute $pythonw -Argument "-m moonhalo_bridge serve" -WorkingDirectory $PSScriptRoot
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $User
     $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
-    Write-Host "Registered the $TaskName task: runs pyw.exe -m moonhalo_bridge serve in $PSScriptRoot at logon as $User, windowless, restarts up to 3 times on failure."
+    Write-Host "Registered the $TaskName task: runs $pythonw -m moonhalo_bridge serve in $PSScriptRoot at logon as $User, windowless, restarts up to 3 times on failure."
 } catch {
     Write-Warning "Register-ScheduledTask refused the account '$User' ($($_.Exception.Message.Trim())); trying schtasks.exe with the launcher instead."
     & schtasks.exe /create /f /tn $TaskName /tr "`"$launcher`"" /sc onlogon /ru $User /rl LIMITED /it | Out-Null

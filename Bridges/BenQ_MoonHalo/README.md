@@ -177,8 +177,10 @@ where those calls are undocumented and Microsoft's own guidance advises against 
 `docs/research/bridge-startup.md`. The MoonHalo is only useful while you are logged in, so
 "starts at logon, stops at logoff" costs nothing here.
 
-The task runs `pyw.exe` (the windowless Python launcher installed alongside `py`) directly,
-with the Bridge folder as its working directory, so no window appears at logon. The committed
+The task runs `pythonw.exe` (the windowless Python interpreter next to `python.exe`) directly,
+with the Bridge folder as its working directory, so no window appears at logon and Task
+Scheduler supervises the Bridge process itself (the `pyw` launcher would exit immediately
+after spawning it, defeating restart-on-failure). The committed
 `run_bridge.cmd` launcher starts the Bridge detached the same way and exits; it is what the
 `schtasks` fallback and manual runs use.
 
