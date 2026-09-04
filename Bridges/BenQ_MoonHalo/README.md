@@ -48,7 +48,7 @@ left out of `config.json` simply uses it.
 | `default_on_level` | `50` | Level (1-100) used by `/moonhalo/on` when no level is given and none is remembered. |
 | `monitor_selector` | `null` | Case-insensitive substring to match a monitor's device name or description, for a PC with more than one monitor. `null` selects the primary monitor. |
 | `state_file` | `"state.json"` | Where remembered state is persisted. Relative paths resolve against the config file's own folder. |
-| `log_file` | `null` | Where request log lines are written. `null` logs to stderr. |
+| `log_file` | `"bridge.log"` | Where request log lines are written, relative to the config folder. Keep a file: the logon task runs windowless, so `null` (stderr) would discard the log. |
 | `default_brightness_step` | `5` | Brightness step (1-10) used the first time a colour-only write needs the "other half" of the register and no state can be read from the monitor. |
 | `default_colortemp_step` | `4` | Colour step (1-7) used the first time a brightness-only write needs the "other half" and no state can be read. |
 | `kelvin_min` | `2700` | Kelvin value for colour step 1 (warmest). |

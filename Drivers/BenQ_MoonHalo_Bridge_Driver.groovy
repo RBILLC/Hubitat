@@ -30,6 +30,9 @@
  *   setColorTempStep.
  *
  * Changelog:
+ * 2026-09-04 1.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
+ *                    as a plain dimmer with no colour-temperature control; Initialize stays out
+ *                    (issue #21)
  * 2026-09-04 1.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
  *                    Google Home app with Bulb alone; accepted CT-only drivers declare neither
  *                    (issue #21)
@@ -45,6 +48,7 @@ metadata {
         capability "Switch"
         capability "SwitchLevel"
         capability "ColorTemperature"
+        capability "ColorMode"
         capability "Bulb"
         capability "Refresh"
 
@@ -73,6 +77,7 @@ metadata {
 void installed() {
     log.info "installed..."
     sendEvent(name: "connectionState", value: "unknown", descriptionText: "${device.displayName} connectionState is unknown")
+    sendEvent(name: "colorMode", value: "CT", descriptionText: "${device.displayName} colorMode is CT")
     initialize()
 }
 
@@ -333,7 +338,7 @@ private Map parseReply(resp) {
 // State and events
 // ---------------------------------------------------------------------------
 
-// Emits switch, level, colorTemperature and colorName from the
+// Emits switch, level, colorTemperature, colorName and colorMode from the
 // Bridge's state. Wording follows Hubitat's example drivers: "is" when the
 // value is unchanged, "was turned" / "was set to" when it changed.
 private void applyState(Map halo, Map data) {
@@ -381,6 +386,10 @@ private void applyState(Map halo, Map data) {
             Boolean nameChanged = device.currentValue("colorName") != colorName
             emitEvent("colorName", colorName, null, "${name} color is ${colorName}", nameChanged)
         }
+    }
+
+    if (device.currentValue("colorMode") != "CT") {
+        emitEvent("colorMode", "CT", null, "${name} colorMode is CT", true)
     }
 
 }

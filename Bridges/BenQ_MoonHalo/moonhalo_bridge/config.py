@@ -26,7 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "default_on_level": 50,
     "monitor_selector": None,
     "state_file": "state.json",
-    "log_file": None,
+    "log_file": "bridge.log",
     "default_brightness_step": 5,
     "default_colortemp_step": 4,
     "kelvin_min": 2700,
