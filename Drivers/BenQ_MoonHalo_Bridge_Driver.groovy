@@ -30,6 +30,9 @@
  *   setColorTempStep.
  *
  * Changelog:
+ * 2026-09-04 1.0.1 - Declare Bulb instead of Light: Hubitat's Google Home app rejected the
+ *                    device ("not supported by Google Home"); its own CT-only example driver and
+ *                    docs use Bulb (issue #21)
  * 2026-09-04 1.0.0 - Initial release (issue #19)
  */
 
@@ -40,7 +43,7 @@ metadata {
         capability "SwitchLevel"
         capability "ColorTemperature"
         capability "ColorMode"
-        capability "Light"
+        capability "Bulb"
         capability "Refresh"
         capability "Initialize"
 
