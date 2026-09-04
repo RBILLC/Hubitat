@@ -10,6 +10,11 @@ Custom Hubitat Elevation drivers and their companion PC-side bridges.
 - Drivers follow the house style of `Drivers/Tuya_TS0601_Soil_Sensor_Driver.groovy`: header comment block, `logEnable`/`txtEnable` preferences with a 30-minute `logsOff`, and a health attribute with values `unknown`/`online`/`offline`.
 - Hubitat has no local test harness; keep driver logic small and put anything testable in the bridge, which is tested with plain `unittest`.
 
+## Working rules
+
+- **Official documentation first.** Before proposing an experiment, a workaround, or a theory about why something fails, find and read the primary source: the vendor's documentation (Hubitat docs2, Google Home developer docs, Microsoft Learn, a project's own README or source). Quote it. If the answer is not already in `docs/research/`, run a research pass and save the findings there. Experiments come after the docs, to confirm what they say, never to explore in their place. Anything not backed by a document is labelled as inference.
+- **Verify what agents report.** A subagent's summary can contradict the facts in its own findings file (one recommended UDP for a port the docs call TCP). Read the findings, not just the summary, before acting on them.
+
 ## Agent skills
 
 ### Issue tracker
