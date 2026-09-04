@@ -30,6 +30,9 @@
  *   setColorTempStep.
  *
  * Changelog:
+ * 2026-09-04 1.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
+ *                    Google Home app with Bulb alone; accepted CT-only drivers declare neither
+ *                    (issue #21)
  * 2026-09-04 1.0.1 - Declare Bulb instead of Light: Hubitat's Google Home app rejected the
  *                    device ("not supported by Google Home"); its own CT-only example driver and
  *                    docs use Bulb (issue #21)
@@ -42,10 +45,8 @@ metadata {
         capability "Switch"
         capability "SwitchLevel"
         capability "ColorTemperature"
-        capability "ColorMode"
         capability "Bulb"
         capability "Refresh"
-        capability "Initialize"
 
         attribute "connectionState", "enum", ["unknown", "online", "offline"]
 
@@ -72,7 +73,6 @@ metadata {
 void installed() {
     log.info "installed..."
     sendEvent(name: "connectionState", value: "unknown", descriptionText: "${device.displayName} connectionState is unknown")
-    sendEvent(name: "colorMode", value: "CT", descriptionText: "${device.displayName} colorMode is CT")
     initialize()
 }
 
@@ -93,7 +93,7 @@ void updated() {
     runIn(2, "refresh")
 }
 
-// Runs on hub start (capability Initialize) and from installed().
+// Called from installed(); the status poll covers hub restarts.
 void initialize() {
     logDebug "initialize()"
     runIn(10, "refresh")
@@ -333,7 +333,7 @@ private Map parseReply(resp) {
 // State and events
 // ---------------------------------------------------------------------------
 
-// Emits switch, level, colorTemperature, colorName and colorMode from the
+// Emits switch, level, colorTemperature and colorName from the
 // Bridge's state. Wording follows Hubitat's example drivers: "is" when the
 // value is unchanged, "was turned" / "was set to" when it changed.
 private void applyState(Map halo, Map data) {
@@ -383,9 +383,6 @@ private void applyState(Map halo, Map data) {
         }
     }
 
-    if (device.currentValue("colorMode") != "CT") {
-        emitEvent("colorMode", "CT", null, "${name} colorMode is CT", true)
-    }
 }
 
 private void emitEvent(String name, value, String unit, String descriptionText, Boolean changed) {
