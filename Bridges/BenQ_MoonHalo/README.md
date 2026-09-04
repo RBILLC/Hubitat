@@ -167,16 +167,59 @@ degrees), `write D7 528` (0x0210, off), and `write D9 <value>` with `<value>` pa
 example `write D9 1029` for colour step 4, brightness step 5). Do not write other VCP codes or
 other D7/D9 values without first confirming them by hand.
 
-## Running as a Windows service (NSSM)
+## Running at logon (recommended)
 
-**Recommended launch method: to be confirmed by the service verification; see the Hub setup
-below.** _[Maintainer: fill in "service" or "logon scheduled task" here once the verification
-in the map task has run, and note the reason if the service could not reach the display.]_
+The Bridge must run in your own logged-in Windows session, because the display functions it
+calls (`EnumDisplayMonitors` and the Monitor Configuration API) belong to the interactive
+desktop. A scheduled task triggered at logon and set to run only when you are logged on is
+documented by Microsoft to run in exactly that session. A Windows service runs in session 0,
+where those calls are undocumented and Microsoft's own guidance advises against them; see
+`docs/research/bridge-startup.md`. The MoonHalo is only useful while you are logged in, so
+"starts at logon, stops at logoff" costs nothing here.
 
-[NSSM](https://nssm.cc/download) manages the Bridge as a proper Windows service (automatic
-start, restart on failure, stdout/stderr captured to files) without writing a service wrapper
-by hand. It is not installed by default: download it from https://nssm.cc/download, then place
-`nssm.exe` on your `PATH` or in `C:\Tools\nssm\`.
+The committed launcher `run_bridge.cmd` changes to its own folder and starts the Bridge with
+`pyw`, the windowless Python launcher installed alongside `py`, so nothing flashes on screen at logon.
+
+Create the task from an **Administrator** PowerShell (creating a task needs elevation even
+though the task itself runs as your ordinary user), with restart-on-failure:
+
+```powershell
+$launcher = "C:\Users\RBILLC\source\repos\Hubitat\Bridges\BenQ_MoonHalo\run_bridge.cmd"
+$action   = New-ScheduledTaskAction -Execute $launcher
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+Register-ScheduledTask -TaskName "MoonHaloBridge" -Action $action -Trigger $trigger -Settings $settings -RunLevel Limited
+```
+
+`-ExecutionTimeLimit Zero` stops Task Scheduler from killing the Bridge after its default
+three-day limit. The equivalent `schtasks` form, without restart-on-failure, is:
+
+```
+schtasks /create /tn "MoonHaloBridge" /tr "\"C:\Users\RBILLC\source\repos\Hubitat\Bridges\BenQ_MoonHalo\run_bridge.cmd\"" /sc onlogon /ru "%USERNAME%" /rl LIMITED /it
+```
+
+Start it now without logging out, check it, stop it, or remove it:
+
+```
+schtasks /run /tn "MoonHaloBridge"
+schtasks /query /tn "MoonHaloBridge" /v
+schtasks /end /tn "MoonHaloBridge"
+schtasks /delete /tn "MoonHaloBridge" /f
+```
+
+Verify: after `schtasks /run`, `curl http://localhost:5000/health` answers `{"ok": true}` and the
+Hub's device page shows `connectionState` online on its next poll or Refresh. Stop any copy of
+the Bridge you started by hand first, or the task's copy will fail with "port in use".
+
+## Running as a Windows service (NSSM, alternative)
+
+Use this only if the Bridge must answer the Hub before anyone logs in. Whether a session-0
+service can reach the monitor is undocumented; if the log shows `outcome=ok` but the halo does
+not change, the service cannot see the display and you must use the logon task above.
+
+[NSSM](https://nssm.cc/download) manages the Bridge as a Windows service (automatic start,
+restart on failure, stdout/stderr captured to files). It is not installed by default: download
+it, then place `nssm.exe` on your `PATH` or in `C:\Tools\nssm\`.
 
 Find your Python executable once:
 
@@ -206,63 +249,24 @@ nssm stop MoonHaloBridge
 nssm remove MoonHaloBridge confirm
 ```
 
-**Session 0 caveat.** Windows services run in session 0, on a non-interactive window station.
-Whether a service in session 0 can successfully call the Windows Monitor Configuration API used
-here (`EnumDisplayMonitors`, `SetVCPFeature`, and related functions) is undocumented — Microsoft
-Learn states the general session-0 restriction for services that show a user interface, but none
-of the monitor-configuration API pages say whether session 0 can reach an attached display at
-all. This is unresolved in this repository's research and must be confirmed by hand (see
-`docs/research/ddcci-windows-api.md`, section 8). If the service cannot reach the monitor, use
-the logon scheduled task fallback below instead.
-
-**Verification steps (run these with the service installed and started):**
-
-1. `nssm start MoonHaloBridge`, then `nssm status MoonHaloBridge` — confirm it reports running.
-2. From the PC (or any machine on the LAN once the firewall rule below is in place), call:
-   ```
-   curl http://localhost:5000/moonhalo/brightness/100
-   curl http://localhost:5000/moonhalo/brightness/10
-   ```
-3. Watch the MoonHalo: it should jump to full brightness on the first call and dim on the
-   second.
-4. Read the log file named in `AppStdout`/`AppStderr` (or `log_file` in `config.json`) and
-   confirm a line for each request with `outcome=ok` and the expected VCP writes.
-5. If the halo does not change but the log shows `ok` with the expected writes reaching a real
-   `WindowsDdcPort` (not `dry_run=True`), the service likely cannot reach the display from
-   session 0; stop and remove the service and use the logon scheduled task below instead.
-
-## Logon scheduled task (fallback)
-
-If the service cannot reach the display, run the Bridge from a scheduled task that starts in
-your own logged-in session instead. This repository includes a launcher, `run_bridge.cmd`, next
-to this README, which changes to its own folder before starting the Bridge so the task's own
-working directory does not matter.
-
-`schtasks /create` has no flag of its own for a task's working directory, which is why the
-committed `run_bridge.cmd` launcher exists: it `cd`s to its own folder before starting the
-Bridge, so `-m moonhalo_bridge` finds the package regardless of what directory the task starts
-in. Point the task at the launcher:
-
-```
-schtasks /create /tn "MoonHaloBridge" /tr "\"C:\Users\RBILLC\source\repos\Hubitat\Bridges\BenQ_MoonHalo\run_bridge.cmd\"" /sc onlogon /ru "%USERNAME%" /rl LIMITED
-```
-
-`run_bridge.cmd` calls `py -m moonhalo_bridge serve %*`, which briefly shows a console window at
-logon. For a windowless run, edit the launcher to call `pythonw` (the windowless interpreter
-that sits next to `python.exe`) instead of `py`. Run the task once by hand to test, check its
-status, and delete it if you switch back to the service:
-
-```
-schtasks /run /tn "MoonHaloBridge"
-schtasks /query /tn "MoonHaloBridge"
-schtasks /delete /tn "MoonHaloBridge" /f
-```
-
-The task only runs once you are logged into that session, so it will not start the Bridge
-before you sign in, and it stops when you sign out — a trade-off against a service, which can
-run without any interactive session.
+Verification: start the service, call `curl http://localhost:5000/moonhalo/brightness/100` and
+then `/10`, and watch the halo. If it does not move while the log reports the writes, remove
+the service (`nssm remove MoonHaloBridge confirm`) and use the logon task.
 
 ## Windows Firewall rule
+
+**Check the network profile first.** Windows applies a rule only to the profiles it names, and a
+home Wi-Fi network is often left on the Public profile. Run `Get-NetConnectionProfile` in
+PowerShell; if your LAN shows `Public`, either mark it private
+(`Set-NetConnectionProfile -InterfaceAlias "Wi-Fi" -NetworkCategory Private`, as Administrator)
+or create the rule with `profile=any`. The narrowest rule admits only the Hub's address:
+
+```
+netsh advfirewall firewall add rule name="MoonHalo Bridge (Hub)" dir=in action=allow protocol=TCP localport=5000 remoteip=192.168.86.73 profile=any
+```
+
+If Windows ever shows a "Windows Security Alert" asking to allow `python.exe`, decline it: that
+creates a rule opening every port for Python on every network. The port rule below is enough.
 
 Open the Bridge's port only to your local subnet, not to the whole internet or every profile:
 
