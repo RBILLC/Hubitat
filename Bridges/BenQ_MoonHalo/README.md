@@ -180,8 +180,20 @@ where those calls are undocumented and Microsoft's own guidance advises against 
 The committed launcher `run_bridge.cmd` changes to its own folder and starts the Bridge with
 `pyw`, the windowless Python launcher installed alongside `py`, so nothing flashes on screen at logon.
 
-Create the task from an **Administrator** PowerShell (creating a task needs elevation even
-though the task itself runs as your ordinary user), with restart-on-failure:
+The easy way: run the committed script, which asks for administrator approval itself, registers
+the task, starts it, and checks the Bridge's health endpoint:
+
+```powershell
+.\install_task.ps1              # register and start
+.\install_task.ps1 -Uninstall   # remove
+```
+
+Right-clicking `install_task.ps1` and choosing "Run with PowerShell" does the same. If the
+script warns that something is already listening on port 5000, stop the copy of the Bridge you
+started by hand and run `schtasks /run /tn MoonHaloBridge`.
+
+Doing it by hand instead, from an **Administrator** PowerShell (creating a task needs elevation
+even though the task itself runs as your ordinary user), with restart-on-failure:
 
 ```powershell
 $launcher = "C:\Users\RBILLC\source\repos\Hubitat\Bridges\BenQ_MoonHalo\run_bridge.cmd"
