@@ -61,7 +61,7 @@ class TestLoadConfigDefaults(unittest.TestCase):
             self.assertIsNone(config.monitor_selector)
             self.assertEqual(config.state_file, Path(tmp) / "state.json")
             self.assertEqual(config.log_file.name, "bridge.log")
-        self.assertEqual(config.log_file.parent, config.state_file.parent)
+            self.assertEqual(config.log_file.parent, config.state_file.parent)
             self.assertEqual(config.default_brightness_step, DEFAULTS["default_brightness_step"])
             self.assertEqual(config.default_colortemp_step, DEFAULTS["default_colortemp_step"])
             self.assertEqual(config.kelvin_min, DEFAULTS["kelvin_min"])
