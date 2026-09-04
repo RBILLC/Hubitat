@@ -1,0 +1,2 @@
+# No third-party dependencies for this ticket (DDC port + command-line mode).
+# Flask arrives in a later ticket when the HTTP layer is built.
