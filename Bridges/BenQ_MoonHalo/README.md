@@ -66,7 +66,7 @@ answerable for a local liveness check.
 
 **Warning: `allowed_macs` and `allowed_ips` both empty means the Bridge is open to any caller on
 the network that can reach its port.** The Bridge logs a startup warning when this is the case.
-The example config carries the Hub's own MAC (`ec:b5:fa:82:2d:1d`) and IP (`192.168.86.27`) so a
+The example config carries the Hub's own MAC (`34:e1:d1:80:9c:62`) and IP (`192.168.86.73`) so a
 copy made from it is restricted from the start; do not deploy with both lists empty.
 
 ## Running by hand
