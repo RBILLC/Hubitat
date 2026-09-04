@@ -128,7 +128,7 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes and no DDC write happens. |
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true}`, no allowlist check, for a local liveness probe. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.3"}`, no allowlist check, for a local liveness probe. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 

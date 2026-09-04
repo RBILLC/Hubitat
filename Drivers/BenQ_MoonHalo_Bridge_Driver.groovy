@@ -29,17 +29,19 @@
  *   only hardware-shaped value is the 1-7 step passed through by
  *   setColorTempStep.
  *
+ * Version: 0.0.3 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
+ *
  * Changelog:
- * 2026-09-04 1.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
+ * 2026-09-04 0.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
  *                    as a plain dimmer with no colour-temperature control; Initialize stays out
  *                    (issue #21)
- * 2026-09-04 1.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
+ * 2026-09-04 0.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
  *                    Google Home app with Bulb alone; accepted CT-only drivers declare neither
  *                    (issue #21)
- * 2026-09-04 1.0.1 - Declare Bulb instead of Light: Hubitat's Google Home app rejected the
+ * 2026-09-04 0.0.1 - Declare Bulb instead of Light: Hubitat's Google Home app rejected the
  *                    device ("not supported by Google Home"); its own CT-only example driver and
  *                    docs use Bulb (issue #21)
- * 2026-09-04 1.0.0 - Initial release (issue #19)
+ * 2026-09-04 0.0.0 - Initial pre-release (issue #19)
  */
 
 metadata {
