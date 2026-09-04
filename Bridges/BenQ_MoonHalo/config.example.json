@@ -1,0 +1,16 @@
+{
+  "host": "0.0.0.0",
+  "port": 5000,
+  "default_on_level": 50,
+  "monitor_selector": null,
+  "state_file": "state.json",
+  "log_file": null,
+  "default_brightness_step": 5,
+  "default_colortemp_step": 4,
+  "kelvin_min": 2700,
+  "kelvin_max": 6500,
+  "invert_colortemp": false,
+  "allowed_macs": ["ec:b5:fa:82:2d:1d"],
+  "allowed_ips": ["192.168.86.27"],
+  "allow_loopback": true
+}

@@ -1,10 +1,12 @@
 """Command-line mode for the MoonHalo Bridge: list monitors, read or write a
-VCP register, against the real monitor or an in-memory fake with `--dry-run`.
+VCP register, or serve the HTTP bridge, against the real monitor or an
+in-memory fake with `--dry-run`.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
 from .ddc import DdcError, DdcPort, FakeDdcPort, MonitorInfo, WindowsDdcPort
@@ -63,6 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
     write_parser.add_argument("code", type=parse_vcp_code, help="VCP code, hex (e.g. D7 or 0xD7)")
     write_parser.add_argument("value", type=parse_value, help="value, decimal or 0x-hex")
 
+    serve_parser = sub.add_parser("serve", help="run the HTTP bridge")
+    serve_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="path to config.json (default: config.json next to the package folder)",
+    )
+
     return parser
 
 
@@ -106,11 +116,34 @@ def _run_write(port: DdcPort, code: int, value: int, dry_run: bool, out: TextIO)
     return 0
 
 
+def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
+    """Build the model and Flask app from config and serve them. Imported
+    lazily so `monitors`/`read`/`write` never need Flask installed."""
+    from .config import load_config
+    from .http import create_app
+    from .model import MoonHaloModel
+
+    config = load_config(config_path)
+    port: DdcPort = make_dry_run_port() if dry_run else WindowsDdcPort(monitor_selector=config.monitor_selector)
+    model = MoonHaloModel(port, config)
+    app = create_app(model, config)
+    print(f"MoonHalo Bridge serving on {config.host}:{config.port} (dry_run={dry_run})", file=out)
+    app.run(host=config.host, port=config.port, threaded=True)
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None, out: Optional[TextIO] = None) -> int:
     """Entry point for `py -m moonhalo_bridge`. Returns a process exit code."""
     out = out if out is not None else sys.stdout
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "serve":
+        try:
+            return _run_serve(args.dry_run, args.config, out)
+        except DdcError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
 
     port: DdcPort = make_dry_run_port() if args.dry_run else WindowsDdcPort()
 
