@@ -22,6 +22,7 @@ from moonhalo_bridge.model import (
     MoonHaloModel,
     brightness_step_to_level,
     colortemp_step_to_kelvin,
+    kelvin_to_colortemp_step,
     level_to_brightness_step,
     pack_d9,
 )
@@ -105,6 +106,41 @@ class TestColortempStepToKelvin(unittest.TestCase):
             colortemp_step_to_kelvin(0, 2700, 6500)
         with self.assertRaises(ValueError):
             colortemp_step_to_kelvin(8, 2700, 6500)
+
+
+class TestKelvinToColortempStep(unittest.TestCase):
+    def test_reference_points(self):
+        self.assertEqual(kelvin_to_colortemp_step(2700, 2700, 6500), 1)
+        self.assertEqual(kelvin_to_colortemp_step(4600, 2700, 6500), 4)
+        self.assertEqual(kelvin_to_colortemp_step(6500, 2700, 6500), 7)
+
+    def test_every_kelvin_in_range_maps_to_a_step_1_to_7(self):
+        for kelvin in range(2700, 6501):
+            step = kelvin_to_colortemp_step(kelvin, 2700, 6500)
+            self.assertGreaterEqual(step, 1)
+            self.assertLessEqual(step, 7)
+
+    def test_round_trip_with_colortemp_step_to_kelvin(self):
+        for step in range(1, 8):
+            centre = colortemp_step_to_kelvin(step, 2700, 6500)
+            self.assertEqual(kelvin_to_colortemp_step(centre, 2700, 6500), step)
+
+    def test_below_range_clamps_to_step_1(self):
+        self.assertEqual(kelvin_to_colortemp_step(0, 2700, 6500), 1)
+        self.assertEqual(kelvin_to_colortemp_step(2699, 2700, 6500), 1)
+
+    def test_above_range_clamps_to_step_7(self):
+        self.assertEqual(kelvin_to_colortemp_step(6501, 2700, 6500), 7)
+        self.assertEqual(kelvin_to_colortemp_step(10000, 2700, 6500), 7)
+
+    def test_invert_flips_reference_points(self):
+        self.assertEqual(kelvin_to_colortemp_step(2700, 2700, 6500, invert=True), 7)
+        self.assertEqual(kelvin_to_colortemp_step(6500, 2700, 6500, invert=True), 1)
+
+    def test_invert_round_trip_with_colortemp_step_to_kelvin(self):
+        for step in range(1, 8):
+            centre = colortemp_step_to_kelvin(step, 2700, 6500, invert=True)
+            self.assertEqual(kelvin_to_colortemp_step(centre, 2700, 6500, invert=True), step)
 
 
 class TestBrightnessScaling(unittest.TestCase):
@@ -263,6 +299,72 @@ class TestMoonHaloModelSetLevel(unittest.TestCase):
         self.assertEqual(self.model.last_writes, self.port.writes)
 
 
+class TestMoonHaloModelSetColortemp(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort()
+        self.config = make_config(self.tmp_dir)
+        self.model = MoonHaloModel(self.port, self.config)
+
+    def test_keeps_remembered_brightness_step(self):
+        self.model.turn_on(50)  # establishes power "on" and brightness step 5
+        self.port.writes.clear()
+        state = self.model.set_colortemp(7)
+        expected_d9 = pack_d9(7, level_to_brightness_step(50))
+        self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
+        self.assertEqual(state["colorTempStep"], 7)
+
+    def test_no_remembered_brightness_reads_d9_and_keeps_low_byte(self):
+        self.port.registers[VCP_D9] = (0x0105, 0x070A)  # low byte 5
+        state = self.model.set_colortemp(7)
+        expected_d9 = pack_d9(7, 5)
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+        self.assertEqual(state["brightnessStep"], 5)
+
+    def test_failing_read_falls_back_to_default_brightness_step_and_warns(self):
+        self.port.fail_reads[VCP_D9] = 3  # exhaust every retry
+        with self.assertLogs(level="WARNING") as logs:
+            state = self.model.set_colortemp(7)
+        self.assertEqual(state["brightnessStep"], self.config.default_brightness_step)
+        self.assertTrue(any("brightness step" in message for message in logs.output))
+
+    def test_colour_while_off_writes_power_on_then_d9_in_order(self):
+        self.model.turn_off()
+        self.port.writes.clear()
+        self.model.set_colortemp(7)
+        self.assertEqual(len(self.port.writes), 2)
+        self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
+        self.assertEqual(self.port.writes[1][0], VCP_D9)
+
+    def test_stage_records_step_with_no_writes_and_power_stays_off(self):
+        state = self.model.set_colortemp(7, stage=True)
+        self.assertEqual(self.port.writes, [])
+        self.assertEqual(self.model.last_writes, [])
+        self.assertEqual(state["colorTempStep"], 7)
+        self.assertEqual(state["power"], "unknown")
+
+    def test_staged_step_used_by_a_following_turn_on(self):
+        self.model.set_colortemp(7, stage=True)
+        self.port.writes.clear()
+        state = self.model.turn_on()
+        expected_d9 = pack_d9(7, level_to_brightness_step(self.config.default_on_level))
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+        self.assertEqual(state["colorTempStep"], 7)
+
+    def test_last_writes_recorded_for_colortemp(self):
+        self.model.turn_on(50)
+        self.port.writes.clear()
+        self.model.set_colortemp(2)
+        self.assertEqual(self.model.last_writes, self.port.writes)
+
+    def test_derives_last_level_from_brightness_when_unknown(self):
+        self.port.registers[VCP_D9] = (0x0105, 0x070A)  # low byte 5
+        state = self.model.set_colortemp(7)
+        self.assertEqual(state["level"], brightness_step_to_level(5))
+
+
 class RaisingDdcPort(FakeDdcPort):
     """A FakeDdcPort whose write_vcp always raises, to exercise the 500 path."""
 
@@ -293,6 +395,13 @@ class TestMoonHaloModelWriteFailure(unittest.TestCase):
         self.assertEqual(state["power"], "unknown")
         self.assertFalse(self.config.state_file.exists())
 
+    def test_set_colortemp_raises_and_leaves_state_unchanged(self):
+        with self.assertRaises(DdcError):
+            self.model.set_colortemp(7)
+        state = self.model.status()
+        self.assertEqual(state["power"], "unknown")
+        self.assertFalse(self.config.state_file.exists())
+
 
 class TestMoonHaloModelStatePersistence(unittest.TestCase):
     def setUp(self):
@@ -316,6 +425,18 @@ class TestMoonHaloModelStatePersistence(unittest.TestCase):
         self.assertEqual(state["level"], 70)
         # the second model's own port has recorded no writes yet
         self.assertEqual(second_port.writes, [])
+
+    def test_colortemp_state_survives_a_second_model_on_the_same_state_file(self):
+        first_port = FakeDdcPort()
+        first_model = MoonHaloModel(first_port, self.config)
+        first_model.set_colortemp(7)
+
+        second_port = FakeDdcPort()
+        second_model = MoonHaloModel(second_port, self.config)
+        state = second_model.status()
+
+        self.assertEqual(state["colorTempStep"], 7)
+        self.assertEqual(state["colorTemperature"], colortemp_step_to_kelvin(7, 2700, 6500))
 
     def test_missing_state_file_starts_unknown(self):
         model = MoonHaloModel(FakeDdcPort(), self.config)

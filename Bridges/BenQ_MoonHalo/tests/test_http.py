@@ -16,6 +16,7 @@ from moonhalo_bridge.model import (
     VCP_D9,
     VCP_POWER,
     MoonHaloModel,
+    colortemp_step_to_kelvin,
     level_to_brightness_step,
     pack_d9,
 )
@@ -213,6 +214,127 @@ class TestMoonHaloBrightness(HttpTestCase):
         self.assertEqual(self.port.writes, [])
 
 
+class TestMoonHaloColortemp(HttpTestCase):
+    def test_kelvin_2700_4600_6500_produce_steps_1_4_7(self):
+        for kelvin, expected_step in ((2700, 1), (4600, 4), (6500, 7)):
+            self.client.get("/moonhalo/on?level=50")
+            self.port.writes.clear()
+            response = self.client.get(f"/moonhalo/colortemp/{kelvin}")
+            self.assertEqual(response.status_code, 200)
+            body = response.get_json()
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["state"]["colorTempStep"], expected_step)
+
+    def test_bare_steps_1_to_7_pass_through(self):
+        for step in range(1, 8):
+            self.client.get("/moonhalo/on?level=50")
+            self.port.writes.clear()
+            response = self.client.get(f"/moonhalo/colortemp/{step}")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["state"]["colorTempStep"], step)
+
+    def test_invalid_values_rejected_with_no_write(self):
+        for value in ("0", "8", "999", "-1", "abc"):
+            self.port.writes.clear()
+            response = self.client.get(f"/moonhalo/colortemp/{value}")
+            self.assertEqual(response.status_code, 400)
+            body = response.get_json()
+            self.assertFalse(body["ok"])
+            self.assertIn("error", body)
+            self.assertEqual(self.port.writes, [])
+
+    def test_invert_flips_direction(self):
+        self.config_inverted = make_config(self.tmp_dir, invert_colortemp=True, state_file=self.tmp_dir / "inv.json")
+        model = MoonHaloModel(FakeDdcPort(), self.config_inverted)
+        app = create_app(model, self.config_inverted)
+        app.testing = True
+        client = app.test_client()
+
+        response = client.get("/moonhalo/colortemp/2700")
+        self.assertEqual(response.get_json()["state"]["colorTempStep"], 7)
+
+        response = client.get("/moonhalo/colortemp/6500")
+        self.assertEqual(response.get_json()["state"]["colorTempStep"], 1)
+
+    def test_invert_status_kelvin_consistent(self):
+        config = make_config(self.tmp_dir, invert_colortemp=True, state_file=self.tmp_dir / "inv2.json")
+        model = MoonHaloModel(FakeDdcPort(), config)
+        app = create_app(model, config)
+        app.testing = True
+        client = app.test_client()
+
+        client.get("/moonhalo/colortemp/2700")
+        status = client.get("/moonhalo/status").get_json()
+        self.assertEqual(status["state"]["colorTempStep"], 7)
+        self.assertEqual(
+            status["state"]["colorTemperature"],
+            colortemp_step_to_kelvin(7, config.kelvin_min, config.kelvin_max, invert=True),
+        )
+
+    def test_d9_write_keeps_remembered_brightness_step(self):
+        self.client.get("/moonhalo/on?level=50")
+        self.port.writes.clear()
+        response = self.client.get("/moonhalo/colortemp/7")
+        expected_d9 = pack_d9(7, level_to_brightness_step(50))
+        self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
+        self.assertEqual(response.get_json()["state"]["colorTempStep"], 7)
+
+    def test_no_remembered_brightness_reads_d9_and_keeps_low_byte(self):
+        self.port.registers[VCP_D9] = (0x0105, 0x070A)  # low byte 5
+        response = self.client.get("/moonhalo/colortemp/7")
+        body = response.get_json()
+        self.assertEqual(body["state"]["brightnessStep"], 5)
+        expected_d9 = pack_d9(7, 5)
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
+
+    def test_failing_read_falls_back_to_default_brightness_step_with_warning(self):
+        self.port.fail_reads[VCP_D9] = 3  # exhaust every retry
+        with self.assertLogs(level="WARNING") as logs:
+            response = self.client.get("/moonhalo/colortemp/7")
+        body = response.get_json()
+        self.assertEqual(body["state"]["brightnessStep"], self.config.default_brightness_step)
+        self.assertTrue(any("brightness step" in message for message in logs.output))
+
+    def test_colour_while_off_writes_d7_then_d9_in_order(self):
+        self.client.get("/moonhalo/off")
+        self.port.writes.clear()
+        response = self.client.get("/moonhalo/colortemp/7")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.port.writes), 2)
+        self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
+        self.assertEqual(self.port.writes[1][0], VCP_D9)
+
+    def test_stage_while_off_records_step_with_no_write_then_on_uses_it(self):
+        self.client.get("/moonhalo/off")
+        self.port.writes.clear()
+
+        response = self.client.get("/moonhalo/colortemp/3000?stage=1")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(self.port.writes, [])
+        self.assertEqual(body["state"]["power"], "off")
+        staged_step = body["state"]["colorTempStep"]
+
+        response = self.client.get("/moonhalo/on")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.port.writes), 2)
+        expected_d9 = pack_d9(staged_step, level_to_brightness_step(self.config.default_on_level))
+        self.assertEqual(self.port.writes[1], (VCP_D9, expected_d9))
+
+    def test_status_after_restart_reports_same_step_and_kelvin(self):
+        self.client.get("/moonhalo/colortemp/6500")
+        expected = self.client.get("/moonhalo/status").get_json()["state"]
+
+        second_model = MoonHaloModel(FakeDdcPort(), self.config)
+        second_app = create_app(second_model, self.config)
+        second_app.testing = True
+        second_client = second_app.test_client()
+        actual = second_client.get("/moonhalo/status").get_json()["state"]
+
+        self.assertEqual(actual["colorTempStep"], expected["colorTempStep"])
+        self.assertEqual(actual["colorTemperature"], expected["colorTemperature"])
+
+
 class TestMoonHaloStatus(HttpTestCase):
     def test_status_performs_no_write(self):
         response = self.client.get("/moonhalo/status")
@@ -272,6 +394,13 @@ class TestDdcFailure(HttpTestCase):
         self.assertFalse(body["ok"])
         self.assertIn("simulated hardware failure", body["error"])
 
+    def test_colortemp_failure_returns_500(self):
+        response = self.client.get("/moonhalo/colortemp/7")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertIn("simulated hardware failure", body["error"])
+
 
 class TestBrightnessLogging(HttpTestCase):
     """The log line for /moonhalo/brightness reports the writes the model
@@ -307,6 +436,17 @@ class TestBrightnessLogging(HttpTestCase):
         lines = [line for line in log_text.splitlines() if "/moonhalo/brightness" in line]
         self.assertEqual(len(lines), 1)
         expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(50))
+        self.assertIn(str((VCP_POWER, POWER_ON_VALUE)), lines[0])
+        self.assertIn(str((VCP_D9, expected_d9)), lines[0])
+
+    def test_colortemp_log_line_contains_the_real_writes(self):
+        response = self.client.get("/moonhalo/colortemp/7")
+        self.assertEqual(response.status_code, 200)
+
+        log_text = self.config.log_file.read_text(encoding="utf-8")
+        lines = [line for line in log_text.splitlines() if "/moonhalo/colortemp" in line]
+        self.assertEqual(len(lines), 1)
+        expected_d9 = pack_d9(7, self.config.default_brightness_step)
         self.assertIn(str((VCP_POWER, POWER_ON_VALUE)), lines[0])
         self.assertIn(str((VCP_D9, expected_d9)), lines[0])
 
