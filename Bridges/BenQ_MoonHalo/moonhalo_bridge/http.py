@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request
 
 from .config import Config
 from .ddc import DdcError
-from .model import POWER_OFF_VALUE, POWER_ON_VALUE, VCP_POWER, MoonHaloModel
+from .model import MoonHaloModel
 
 #: Writes a call to /moonhalo/status (or /health) always produces: none.
 NO_WRITES: list[tuple[int, int]] = []
@@ -56,6 +56,21 @@ def _parse_level(raw: Optional[str]) -> Optional[int]:
     return level
 
 
+def _parse_brightness(raw: str) -> int:
+    """Validate the `/moonhalo/brightness/<value>` path segment: an integer
+    0-100. `<value>` is captured as a plain string (not Flask's `<int:...>`
+    converter) so a non-numeric value gets a 400, not a 404. Raises
+    ValueError, with a message fit for a 400 body, otherwise.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"brightness must be an integer 0-100, got {raw!r}") from None
+    if not 0 <= value <= 100:
+        raise ValueError(f"brightness must be 0-100, got {value}")
+    return value
+
+
 def create_app(model: MoonHaloModel, config: Config) -> Flask:
     """Build the Flask app wiring GET endpoints to `model`."""
     app = Flask(__name__)
@@ -75,27 +90,43 @@ def create_app(model: MoonHaloModel, config: Config) -> Flask:
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        writes = [(VCP_POWER, POWER_ON_VALUE)]
         try:
             state = model.turn_on(level)
         except DdcError as error:
-            _log_request(logger, endpoint, writes, f"error:{error}")
+            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, writes, "ok")
+        _log_request(logger, endpoint, model.last_writes, "ok")
         return jsonify({"ok": True, "state": state}), 200
 
     @app.get("/moonhalo/off")
     def moonhalo_off():
         endpoint = "/moonhalo/off"
-        writes = [(VCP_POWER, POWER_OFF_VALUE)]
         try:
             state = model.turn_off()
         except DdcError as error:
-            _log_request(logger, endpoint, writes, f"error:{error}")
+            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, writes, "ok")
+        _log_request(logger, endpoint, model.last_writes, "ok")
+        return jsonify({"ok": True, "state": state}), 200
+
+    @app.get("/moonhalo/brightness/<value>")
+    def moonhalo_brightness(value: str):
+        endpoint = "/moonhalo/brightness"
+        try:
+            level = _parse_brightness(value)
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
+        try:
+            state = model.set_level(level)
+        except DdcError as error:
+            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 500
+
+        _log_request(logger, endpoint, model.last_writes, "ok")
         return jsonify({"ok": True, "state": state}), 200
 
     @app.get("/moonhalo/status")
