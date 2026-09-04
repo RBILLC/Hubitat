@@ -14,6 +14,7 @@ from typing import Optional
 from flask import Flask, jsonify, request
 
 from .access import AccessPolicy, ArpTable, WindowsArpTable
+from . import __version__
 from .config import Config
 from .ddc import DdcError
 from .model import MoonHaloModel, kelvin_to_colortemp_step
@@ -130,7 +131,7 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     @app.get("/health")
     def health():
         _log_request(logger, "/health", NO_WRITES, "ok")
-        return jsonify({"ok": True}), 200
+        return jsonify({"ok": True, "version": __version__}), 200
 
     @app.get("/moonhalo/on")
     def moonhalo_on():

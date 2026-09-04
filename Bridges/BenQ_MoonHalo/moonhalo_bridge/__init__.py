@@ -5,3 +5,6 @@ hands-on DDC access (`monitors`/`read`/`write`) and serving the HTTP bridge
 (`serve`). Brightness and colour-temperature writes to VCP D9 arrive in a
 later ticket.
 """
+
+#: Bridge version, kept in lockstep with the Driver's header version.
+__version__ = "0.0.3"

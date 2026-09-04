@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+
+from moonhalo_bridge import __version__
 from pathlib import Path
 
 from moonhalo_bridge.access import FakeArpTable
@@ -70,7 +72,7 @@ class TestHealth(HttpTestCase):
     def test_health_ok_with_no_ddc_call(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {"ok": True})
+        self.assertEqual(response.get_json(), {"ok": True, "version": __version__})
         self.assertEqual(self.port.writes, [])
 
 
