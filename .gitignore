@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Bridge runtime files (machine-specific)
+Bridges/*/config.json
+Bridges/*/state.json
+Bridges/*/*.log
+
+# Local scratch used by agent skills
+.scratch/
