@@ -32,7 +32,7 @@ DEFAULTS: dict[str, Any] = {
     "kelvin_min": 2700,
     "kelvin_max": 6500,
     "invert_colortemp": False,
-    # Placeholders for the access-control ticket; not enforced yet.
+    # Access control: enforced by moonhalo_bridge.access.AccessPolicy.
     "allowed_macs": [],
     "allowed_ips": [],
     "allow_loopback": True,
