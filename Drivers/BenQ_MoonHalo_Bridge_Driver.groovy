@@ -29,9 +29,11 @@
  *   only hardware-shaped value is the 1-7 step passed through by
  *   setColorTempStep.
  *
- * Version: 0.0.4 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
+ * Version: 0.0.5 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
  *
  * Changelog:
+ * 2026-09-04 0.0.5 - Google Home typing test: colorMode "CT" back, still no custom attribute;
+ *                    0.0.4 was accepted but typed as a plain dimmer (issue #21)
  * 2026-09-04 0.0.4 - Google Home typing test: attribute set reduced to the CT bulb's (switch,
  *                    level, colorTemperature, colorName); connectionState kept as a data value;
  *                    stale colorMode/connectionState attributes purged on save (issue #21)
@@ -53,6 +55,7 @@ metadata {
         capability "Switch"
         capability "SwitchLevel"
         capability "ColorTemperature"
+        capability "ColorMode"
         capability "Bulb"
         capability "Refresh"
 
@@ -80,6 +83,7 @@ metadata {
 void installed() {
     log.info "installed..."
     device.updateDataValue("connectionState", "unknown")
+    sendEvent(name: "colorMode", value: "CT", descriptionText: "${device.displayName} colorMode is CT")
     initialize()
 }
 
@@ -110,7 +114,7 @@ void initialize() {
 // Google Home types a device by its attribute set, and attribute values outlive the driver
 // that created them, so remove the ones this version no longer declares.
 private void purgeStaleAttributes() {
-    ["colorMode", "connectionState"].each { String name ->
+    ["connectionState"].each { String name ->
         try {
             if (device.currentValue(name, true) != null) {
                 device.deleteCurrentState(name)
@@ -356,7 +360,7 @@ private Map parseReply(resp) {
 // State and events
 // ---------------------------------------------------------------------------
 
-// Emits switch, level, colorTemperature and colorName from the
+// Emits switch, level, colorTemperature, colorName and colorMode from the
 // Bridge's state. Wording follows Hubitat's example drivers: "is" when the
 // value is unchanged, "was turned" / "was set to" when it changed.
 private void applyState(Map halo, Map data) {
@@ -404,6 +408,10 @@ private void applyState(Map halo, Map data) {
             Boolean nameChanged = device.currentValue("colorName") != colorName
             emitEvent("colorName", colorName, null, "${name} color is ${colorName}", nameChanged)
         }
+    }
+
+    if (device.currentValue("colorMode") != "CT") {
+        emitEvent("colorMode", "CT", null, "${name} colorMode is CT", true)
     }
 
 }
