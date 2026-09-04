@@ -10,7 +10,11 @@
   "kelvin_min": 2700,
   "kelvin_max": 6500,
   "invert_colortemp": false,
-  "allowed_macs": ["ec:b5:fa:82:2d:1d"],
-  "allowed_ips": ["192.168.86.27"],
+  "allowed_macs": [
+    "34:e1:d1:80:9c:62"
+  ],
+  "allowed_ips": [
+    "192.168.86.73"
+  ],
   "allow_loopback": true
 }
