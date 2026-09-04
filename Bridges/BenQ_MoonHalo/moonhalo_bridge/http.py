@@ -1,9 +1,9 @@
 """Flask HTTP layer for the MoonHalo Bridge: maps GET endpoints onto the
 MoonHalo model.
 
-`create_app(model, config)` builds the Flask app. The access-control
-allowlists (`allowed_macs`, `allowed_ips`, `allow_loopback`) are read from
-`config` but not enforced here; that is a later ticket.
+`create_app(model, config, arp)` builds the Flask app. A `before_request`
+hook enforces the access-control allowlists (`allowed_macs`, `allowed_ips`,
+`allow_loopback`) from `config` on every path except `/health`.
 """
 from __future__ import annotations
 
@@ -13,12 +13,18 @@ from typing import Optional
 
 from flask import Flask, jsonify, request
 
+from .access import AccessPolicy, ArpTable, WindowsArpTable
 from .config import Config
 from .ddc import DdcError
 from .model import MoonHaloModel, kelvin_to_colortemp_step
 
 #: Writes a call to /moonhalo/status (or /health) always produces: none.
 NO_WRITES: list[tuple[int, int]] = []
+
+#: Module logger (propagates to root) for the once-at-startup open-policy
+#: warning, kept separate from the per-app request logger below, whose
+#: handlers are reset on every `create_app` call.
+_logger = logging.getLogger(__name__)
 
 
 def _configure_logger(config: Config) -> logging.Logger:
@@ -93,10 +99,33 @@ def _parse_colortemp(raw: str, kelvin_min: int, kelvin_max: int, invert: bool) -
     raise ValueError(f"colortemp must be 1-7 (step) or >= 1000 (Kelvin), got {parsed}")
 
 
-def create_app(model: MoonHaloModel, config: Config) -> Flask:
-    """Build the Flask app wiring GET endpoints to `model`."""
+def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = None) -> Flask:
+    """Build the Flask app wiring GET endpoints to `model`, enforcing the
+    access policy built from `config` on every path except `/health`.
+    `arp` defaults to `WindowsArpTable()`.
+    """
     app = Flask(__name__)
     logger = _configure_logger(config)
+    arp_table = arp if arp is not None else WindowsArpTable()
+    policy = AccessPolicy(config.allowed_macs, config.allowed_ips, config.allow_loopback)
+
+    if policy.is_open:
+        _logger.warning(
+            "access policy is open (allowed_macs and allowed_ips are both empty): "
+            "the Bridge accepts requests from any caller"
+        )
+
+    @app.before_request
+    def enforce_access_policy():
+        if request.path == "/health":
+            return None
+        remote_ip = request.remote_addr
+        decision = policy.check(remote_ip, arp_table)
+        if not decision.allowed:
+            mac_text = decision.mac if decision.mac is not None else "unresolved"
+            logger.info("access denied ip=%s mac=%s path=%s", remote_ip, mac_text, request.path)
+            return jsonify({"ok": False, "error": "forbidden"}), 403
+        return None
 
     @app.get("/health")
     def health():

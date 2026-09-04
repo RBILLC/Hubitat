@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from moonhalo_bridge.access import FakeArpTable
 from moonhalo_bridge.config import Config
 from moonhalo_bridge.ddc import DdcError, FakeDdcPort
 from moonhalo_bridge.http import create_app
@@ -449,6 +450,182 @@ class TestBrightnessLogging(HttpTestCase):
         expected_d9 = pack_d9(7, self.config.default_brightness_step)
         self.assertIn(str((VCP_POWER, POWER_ON_VALUE)), lines[0])
         self.assertIn(str((VCP_D9, expected_d9)), lines[0])
+
+
+class AccessControlTestCase(unittest.TestCase):
+    """Builds an app with a non-empty allowlist and a FakeArpTable, per the
+    ticket's testing decisions: everything is driven through the Flask test
+    client, with the caller set via `environ_base={"REMOTE_ADDR": ...}`.
+    """
+
+    ALLOWED_MAC = "ec:b5:fa:82:2d:1d"
+    ALLOWED_IP = "192.168.86.27"
+    HUB_IP = "192.168.86.27"
+    OTHER_IP = "192.168.86.50"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort()
+
+    def build(self, arp_entries=None, **config_overrides):
+        overrides = dict(allowed_macs=[self.ALLOWED_MAC], allowed_ips=[], allow_loopback=True)
+        overrides.update(config_overrides)
+        config = make_config(self.tmp_dir, **overrides)
+        model = MoonHaloModel(self.port, config)
+        arp = FakeArpTable(arp_entries or {})
+        app = create_app(model, config, arp=arp)
+        app.testing = True
+        return app.test_client(), config
+
+    def get(self, client, path, remote_addr):
+        return client.get(path, environ_base={"REMOTE_ADDR": remote_addr})
+
+
+class TestAccessAllowedMac(AccessControlTestCase):
+    def test_allowed_mac_succeeds(self):
+        client, _ = self.build(arp_entries={self.HUB_IP: self.ALLOWED_MAC})
+        response = self.get(client, "/moonhalo/status", self.HUB_IP)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+
+
+class TestAccessDifferentMac(AccessControlTestCase):
+    def test_different_mac_gets_403(self):
+        client, _ = self.build(arp_entries={self.OTHER_IP: "aa:bb:cc:dd:ee:ff"})
+        response = self.get(client, "/moonhalo/status", self.OTHER_IP)
+        self.assertEqual(response.status_code, 403)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "forbidden")
+
+
+class TestAccessIpAbsentFromArp(AccessControlTestCase):
+    def test_ip_with_no_arp_entry_gets_403(self):
+        client, _ = self.build(arp_entries={})
+        response = self.get(client, "/moonhalo/status", self.OTHER_IP)
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.get_json()["ok"])
+
+
+class TestAccessIpAllowlist(AccessControlTestCase):
+    def test_ip_allowlist_admits_without_arp_entry(self):
+        config = make_config(
+            self.tmp_dir,
+            allowed_macs=[],
+            allowed_ips=[self.ALLOWED_IP],
+            allow_loopback=True,
+        )
+        model = MoonHaloModel(self.port, config)
+        app = create_app(model, config, arp=FakeArpTable({}))
+        app.testing = True
+        client = app.test_client()
+
+        response = self.get(client, "/moonhalo/status", self.ALLOWED_IP)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+
+
+class TestAccessMacFormats(AccessControlTestCase):
+    def test_mac_formats_compare_equal(self):
+        for raw_mac in ("EC-B5-FA-82-2D-1D", "ec:b5:fa:82:2d:1d", "ecb5.fa82.2d1d", "Ec:B5:fA:82:2D:1d"):
+            with self.subTest(raw_mac=raw_mac):
+                client, _ = self.build(arp_entries={self.HUB_IP: raw_mac})
+                response = self.get(client, "/moonhalo/status", self.HUB_IP)
+                self.assertEqual(response.status_code, 200)
+
+
+class TestAccessLoopback(AccessControlTestCase):
+    def test_loopback_admitted_when_allowed(self):
+        client, _ = self.build(arp_entries={})
+        response = self.get(client, "/moonhalo/status", "127.0.0.1")
+        self.assertEqual(response.status_code, 200)
+
+    def test_loopback_rejected_when_disallowed(self):
+        client, _ = self.build(arp_entries={}, allow_loopback=False)
+        response = self.get(client, "/moonhalo/status", "127.0.0.1")
+        self.assertEqual(response.status_code, 403)
+
+
+class TestAccessOpenPolicy(AccessControlTestCase):
+    def test_open_policy_admits_anyone_and_logs_startup_warning(self):
+        config = make_config(
+            self.tmp_dir,
+            allowed_macs=[],
+            allowed_ips=[],
+            allow_loopback=True,
+        )
+        model = MoonHaloModel(self.port, config)
+        with self.assertLogs(level="WARNING") as logs:
+            app = create_app(model, config, arp=FakeArpTable({}))
+        self.assertTrue(any("open" in message.lower() for message in logs.output))
+
+        app.testing = True
+        client = app.test_client()
+        response = self.get(client, "/moonhalo/status", self.OTHER_IP)
+        self.assertEqual(response.status_code, 200)
+
+
+class TestAccessHealthBypasses(AccessControlTestCase):
+    def test_health_bypasses_policy_from_denied_caller(self):
+        client, _ = self.build(arp_entries={})
+        response = self.get(client, "/health", self.OTHER_IP)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+
+
+class TestAccessEnforcedOnEveryEndpoint(AccessControlTestCase):
+    def test_every_moonhalo_endpoint_is_enforced(self):
+        client, _ = self.build(arp_entries={})
+        paths = [
+            "/moonhalo/on",
+            "/moonhalo/off",
+            "/moonhalo/status",
+            "/moonhalo/brightness/50",
+            "/moonhalo/colortemp/4",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                response = self.get(client, path, self.OTHER_IP)
+                self.assertEqual(response.status_code, 403)
+                self.assertFalse(response.get_json()["ok"])
+        self.assertEqual(self.port.writes, [])
+
+
+class TestAccessDenialLogging(AccessControlTestCase):
+    def test_denied_request_logs_ip_and_mac_and_performs_no_ddc_write(self):
+        config = make_config(
+            self.tmp_dir,
+            allowed_macs=[self.ALLOWED_MAC],
+            allowed_ips=[],
+            allow_loopback=True,
+            log_file=self.tmp_dir / "bridge.log",
+        )
+        model = MoonHaloModel(self.port, config)
+        arp = FakeArpTable({self.OTHER_IP: "aa:bb:cc:dd:ee:ff"})
+        app = create_app(model, config, arp=arp)
+        app.testing = True
+        client = app.test_client()
+        self.addCleanup(self._close_log_handlers, config)
+
+        response = self.get(client, "/moonhalo/on", self.OTHER_IP)
+        self.assertEqual(response.status_code, 403)
+
+        log_text = config.log_file.read_text(encoding="utf-8")
+        lines = [line for line in log_text.splitlines() if "access denied" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(self.OTHER_IP, lines[0])
+        self.assertIn("aa:bb:cc:dd:ee:ff", lines[0])
+        self.assertEqual(self.port.writes, [])
+
+    def _close_log_handlers(self, config: Config) -> None:
+        import logging
+
+        logger = logging.getLogger(f"moonhalo_bridge.http.{id(config)}")
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
 
 
 if __name__ == "__main__":

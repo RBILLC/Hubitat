@@ -119,6 +119,7 @@ def _run_write(port: DdcPort, code: int, value: int, dry_run: bool, out: TextIO)
 def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     """Build the model and Flask app from config and serve them. Imported
     lazily so `monitors`/`read`/`write` never need Flask installed."""
+    from .access import WindowsArpTable
     from .config import load_config
     from .http import create_app
     from .model import MoonHaloModel
@@ -126,7 +127,7 @@ def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     config = load_config(config_path)
     port: DdcPort = make_dry_run_port() if dry_run else WindowsDdcPort(monitor_selector=config.monitor_selector)
     model = MoonHaloModel(port, config)
-    app = create_app(model, config)
+    app = create_app(model, config, arp=WindowsArpTable())
     print(f"MoonHalo Bridge serving on {config.host}:{config.port} (dry_run={dry_run})", file=out)
     app.run(host=config.host, port=config.port, threaded=True)
     return 0
