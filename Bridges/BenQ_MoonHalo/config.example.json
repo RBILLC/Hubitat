@@ -16,5 +16,11 @@
   "allowed_ips": [
     "192.168.86.73"
   ],
-  "allow_loopback": true
+  "allow_loopback": true,
+  "hub_ip": "192.168.86.73",
+  "maker_api_app_id": null,
+  "maker_api_device_id": null,
+  "maker_api_token": null,
+  "announce_seconds": 60,
+  "announce_enabled": null
 }

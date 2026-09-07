@@ -43,7 +43,7 @@ left out of `config.json` simply uses it.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `host` | `"0.0.0.0"` | Address the Bridge listens on. `0.0.0.0` means every interface. |
+| `host` | `"0.0.0.0"` | Address the Bridge listens on. `0.0.0.0` means every interface, and the address announced to the Hub is then the one that routes to `hub_ip`; a specific address is announced as typed. `127.0.0.1` disables the announcement, since the Hub could never reach it. |
 | `port` | `5000` | TCP port the Bridge listens on. |
 | `default_on_level` | `50` | Level (1-100) used by `/moonhalo/on` when no level is given and none is remembered. |
 | `monitor_selector` | `null` | Case-insensitive substring to match a monitor's device name or description, for a PC with more than one monitor. `null` selects the primary monitor. |
@@ -57,6 +57,12 @@ left out of `config.json` simply uses it.
 | `allowed_macs` | `[]` | MAC addresses allowed to call the Bridge (any format: colons, dashes, or dot groups). |
 | `allowed_ips` | `[]` | IP addresses allowed to call the Bridge, checked before the MAC lookup. |
 | `allow_loopback` | `true` | Allow `127.0.0.1` / `::1` regardless of the lists above, for local testing with `curl`. |
+| `hub_ip` | `null` | The Hub's IP address, for the address announcement below. Also the target the Bridge's own LAN address is chosen against. |
+| `maker_api_app_id` | `null` | The Maker API app id from the app's example URLs. |
+| `maker_api_device_id` | `null` | The MoonHalo device's id in the Maker API's device list. |
+| `maker_api_token` | `null` | The Maker API access token. Lives only in `config.json`, which is gitignored; it never appears in the log. |
+| `announce_seconds` | `60` | Seconds between address announcements (at least 1). Keep it below the Driver's **Announcement timeout** (default 200), or the Hub will mark the Bridge offline between announcements. |
+| `announce_enabled` | `null` | `null` means announce whenever the four Maker values above are set; `true` or `false` forces it. |
 
 **Allowlist rules.** A caller is allowed if any of these hold, checked in order: it is loopback
 and `allow_loopback` is true; both `allowed_macs` and `allowed_ips` are empty (see the warning
@@ -128,7 +134,7 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes and no DDC write happens. |
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.3"}`, no allowlist check, for a local liveness probe. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.4"}`, no allowlist check, for a local liveness probe. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -145,6 +151,69 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
   }
 }
 ```
+
+## Letting the Hub find the Bridge
+
+The PC's LAN address changes (DHCP, joining or leaving Tailscale), and this project does not
+rely on a DHCP reservation. Instead the Bridge tells the Hub where it is: through Hubitat's
+**Maker API** app it calls the Driver's `setBridgeAddress(ip, port)` command when it starts,
+every `announce_seconds` (default 60), and within a few seconds of its LAN address changing.
+The Driver then sends every command to the announced address, shows it in its `bridgeAddress`
+attribute, and marks the MoonHalo offline when the announcements stop for longer than its
+announcement timeout (default 200 seconds).
+
+The address announced is the local address Windows would use to reach `hub_ip`, read from a
+UDP socket connected to the Hub without sending anything, so a Tailscale or other overlay
+adapter is never chosen.
+
+Set it up once:
+
+1. In the Hubitat web console open **Apps**. If **Maker API** is not listed, click **Add
+   Built-In App** and choose **Maker API**.
+2. In the app, turn on **Allow Access via Local IP Address** and select the MoonHalo device
+   under **Select Devices**. Click **Done** (or **Update**).
+3. Reopen the app. Its example URLs look like
+   `http://192.168.86.73/apps/api/12/devices?access_token=xxxxxxxx-...`: the number after
+   `/apps/api/` is `maker_api_app_id`, and the value after `access_token=` is
+   `maker_api_token`. Open the **Get All Devices** example URL in a browser and copy the
+   MoonHalo's `id` into `maker_api_device_id`.
+4. Put the four values in `config.json`, together with the Hub's address:
+
+   ```json
+   "hub_ip": "192.168.86.73",
+   "maker_api_app_id": 12,
+   "maker_api_device_id": 345,
+   "maker_api_token": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+   ```
+
+   `config.json` is gitignored; the token belongs nowhere else.
+5. Restart the Bridge (`schtasks /end /tn MoonHaloBridge` then `schtasks /run /tn MoonHaloBridge`,
+   or Ctrl+C and start it again by hand).
+
+What to expect: the startup line `Announcing the Bridge address to hub 192.168.86.73 every 60s`
+on the console, and in `bridge.log` one line per address change:
+
+```
+2026-09-07 16:30:03,308 announced Bridge address 192.168.86.115:5000 to hub 192.168.86.73
+```
+
+Unchanged repeats are not logged. If the Hub cannot be reached or rejects the call (wrong
+token, wrong app or device id, local access not enabled), or no route to `hub_ip` exists, the
+log carries one warning such as `announcement of 192.168.86.115:5000 to hub 192.168.86.73
+failed: HTTPError: HTTP Error 401: Unauthorized`, then stays quiet until it succeeds and logs
+the address again. Announcement failures never affect MoonHalo commands. The Bridge binds its
+port before the first announcement, so a Bridge that fails to start never tells the Hub it is
+up. On the Hub, the device's `bridgeAddress` attribute shows `ip:port` and `connectionState`
+is online; the device's events show the announcement.
+
+On the Hub side the Driver treats any reply from the Bridge as proof of life, not only
+announcements: once an announcement has ever arrived, the device goes offline only when
+nothing at all has been heard for the announcement timeout. Retyping the Bridge IP or port in
+the device's preferences forgets the announced address until the next announcement; saving
+other preferences keeps it.
+
+Leave the four Maker values out of `config.json` and nothing changes: the Driver keeps using
+the address typed in its preferences, exactly as before.
 
 ## Command-line mode
 
@@ -306,6 +375,9 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | A DDC/CI call fails with a large error code (formatted as a decimal, but corresponding to a hex value in the `0xC026xxxx` range) | This is a Windows Graphics Kernel DDC/CI channel error, often transient on this monitor. Reads already retry three times; a `write` is not retried, so simply try the command again. Persistent errors suggest a cable or connection problem rather than the Bridge. |
 | `GET` requests get `{"ok": false, "error": "forbidden"}` with a 403 | The caller's IP is not in `allowed_ips`, and its MAC (resolved through the PC's ARP table with `arp -a <ip>`) is not in `allowed_macs`. Confirm the Hub's IP and MAC in `config.json`, and that the PC has recently exchanged traffic with the Hub so the OS ARP cache has an entry for it — a stale or absent entry resolves to no MAC and is denied. `/health` is exempt from this check and always answers. |
 | `serve` fails to start, e.g. "port in use" / `OSError: [WinError 10048]` | Another process (perhaps a previous `serve` still running, or the NSSM service) is already bound to `config.json`'s `port`. Stop it first (`nssm stop MoonHaloBridge`, or find and end the other `python.exe`/`pythonw.exe` process), or change `port` in `config.json`. |
+| `bridge.log` shows `announcement of ... failed: HTTPError: HTTP Error 401` (or 404 / 500) | The Maker API rejected the call. 401 or 403: the token is wrong or **Allow Access via Local IP Address** is off. 404 or 500: the app id or device id is wrong, or the MoonHalo device is not selected in the Maker API app, or the Driver on the Hub is older than 0.0.8 and has no `setBridgeAddress` command. |
+| `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
+| The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
 
 ## Tests
@@ -317,4 +389,5 @@ py -m unittest
 ```
 
 The tests need no monitor: they drive the Flask app over HTTP with a fake DDC port that records
-every write, the same way the spec's testing decisions describe.
+every write, the same way the spec's testing decisions describe. The announcer is tested with a
+fake HTTP sender and a fake address source, so no request ever leaves the machine.

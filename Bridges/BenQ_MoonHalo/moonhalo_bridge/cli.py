@@ -124,13 +124,58 @@ def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     from .http import create_app
     from .model import MoonHaloModel
 
+    from werkzeug.serving import make_server
+
     config = load_config(config_path)
     port: DdcPort = make_dry_run_port() if dry_run else WindowsDdcPort(monitor_selector=config.monitor_selector)
     model = MoonHaloModel(port, config)
     app = create_app(model, config, arp=WindowsArpTable())
+    # Bind before announcing, so a Bridge that cannot take its port never
+    # tells the Hub it is up.
+    server = make_server(config.host, config.port, app, threaded=True)
+    announcer = start_announcer(config, out)
     print(f"MoonHalo Bridge serving on {config.host}:{config.port} (dry_run={dry_run})", file=out)
-    app.run(host=config.host, port=config.port, threaded=True)
+    try:
+        server.serve_forever()
+    finally:
+        if announcer is not None:
+            announcer.stop()
     return 0
+
+
+def start_announcer(config, out: TextIO):
+    """Start the Maker API announcer on its daemon thread when config
+    enables it; return it, or None. A config that asks for announcements
+    but lacks a Maker API value, or listens on loopback only, gets one
+    warning and no announcer."""
+    from .announce import Announcer, is_loopback_host
+    from .logs import file_logger
+
+    if not config.announce_enabled:
+        return None
+    logger = file_logger("moonhalo_bridge.announce", config)
+    message = None
+    if not config.maker_configured:
+        message = (
+            "announce_enabled is true but hub_ip, maker_api_app_id, maker_api_device_id "
+            "and maker_api_token are not all set: the Bridge address will not be announced"
+        )
+    elif is_loopback_host(config.host):
+        message = (
+            f"host is {config.host}, which the Hub cannot reach: the Bridge address "
+            "will not be announced"
+        )
+    if message is not None:
+        logger.warning(message)
+        print(f"warning: {message}", file=out)
+        return None
+    announcer = Announcer(config, logger=logger)
+    announcer.start()
+    print(
+        f"Announcing the Bridge address to hub {config.hub_ip} every {config.announce_seconds}s",
+        file=out,
+    )
+    return announcer
 
 
 def main(argv: Optional[Sequence[str]] = None, out: Optional[TextIO] = None) -> int:

@@ -8,7 +8,6 @@ hook enforces the access-control allowlists (`allowed_macs`, `allowed_ips`,
 from __future__ import annotations
 
 import logging
-import sys
 from typing import Optional
 
 from flask import Flask, jsonify, request
@@ -17,6 +16,7 @@ from .access import AccessPolicy, ArpTable, WindowsArpTable
 from . import __version__
 from .config import Config
 from .ddc import DdcError
+from .logs import file_logger
 from .model import MoonHaloModel, kelvin_to_colortemp_step
 
 #: Writes a call to /moonhalo/status (or /health) always produces: none.
@@ -31,17 +31,7 @@ _logger = logging.getLogger(__name__)
 def _configure_logger(config: Config) -> logging.Logger:
     """One logger per app, writing to `config.log_file` or stderr when
     `log_file` is None, per request line: endpoint, VCP writes, outcome."""
-    logger = logging.getLogger(f"moonhalo_bridge.http.{id(config)}")
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    if config.log_file:
-        handler: logging.Handler = logging.FileHandler(config.log_file, encoding="utf-8")
-    else:
-        handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    logger.addHandler(handler)
-    logger.propagate = False
-    return logger
+    return file_logger(f"moonhalo_bridge.http.{id(config)}", config)
 
 
 def _log_request(logger: logging.Logger, endpoint: str, writes: list[tuple[int, int]], outcome: str) -> None:
