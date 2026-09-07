@@ -63,6 +63,7 @@ left out of `config.json` simply uses it.
 | `maker_api_token` | `null` | The Maker API access token. Lives only in `config.json`, which is gitignored; it never appears in the log. |
 | `announce_seconds` | `60` | Seconds between address announcements (at least 1). Keep it below the Driver's **Announcement timeout** (default 200), or the Hub will mark the Bridge offline between announcements. |
 | `announce_enabled` | `null` | `null` means announce whenever the four Maker values above are set; `true` or `false` forces it. |
+| `transition_seconds` | `0.6` | Default Transition, in seconds, for every brightness move; `0` makes every change immediate. The default is tuned to spread the MoonHalo's nine brightness steps evenly at the monitor's ~60ms write pace. |
 
 **Allowlist rules.** A caller is allowed if any of these hold, checked in order: it is loopback
 and `allow_loopback` is true; both `allowed_macs` and `allowed_ips` are empty (see the warning
@@ -131,10 +132,10 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 |---|---|---|
 | `GET /moonhalo/on` | `level` (query, optional, 1-100) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. |
 | `GET /moonhalo/off` | none | Turns the halo off. Leaves the remembered level and colour step untouched. |
-| `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off. |
+| `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60, default `transition_seconds`) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` over `transition` seconds -- immediately if `transition` is `0` or the move is at most one hardware step. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes and no DDC write happens. |
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.4"}`, no allowlist check, for a local liveness probe. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.5"}`, no allowlist check, for a local liveness probe. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -148,8 +149,23 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "colorTempStep": 4,
     "colorTemperature": 4600,
     "monitor": "Generic PnP Monitor"
-  }
+  },
+  "transition": {"seconds": 0.6, "steps": 1}
 }
+```
+
+A brightness reply always carries a `transition` object reporting the Transition actually applied: `seconds` is the
+transition used (the query value, or `transition_seconds` when the query was absent), and `steps` is how many D9
+writes it takes to get there -- `1` for an immediate change. The reply returns as soon as the change is accepted;
+when `steps` is more than 1, the writes themselves continue in the background for up to `seconds` more. For example,
+`GET /moonhalo/brightness/100?transition=1.2` starts a longer Ramp and replies immediately:
+
+```
+curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
+```
+
+```json
+{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}}
 ```
 
 ## Letting the Hub find the Bridge
@@ -379,6 +395,7 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
+| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long `transition` is, and a shorter `transition` drops even more of them evenly (0.4s fits about six at the monitor's ~60ms write pace). This is a hardware limit, not a bug in the Bridge. |
 
 ## Tests
 

@@ -38,6 +38,24 @@ def _log_request(logger: logging.Logger, endpoint: str, writes: list[tuple[int, 
     logger.info("endpoint=%s writes=%s outcome=%s", endpoint, writes, outcome)
 
 
+def _log_brightness_request(
+    logger: logging.Logger, endpoint: str, model: MoonHaloModel, level: int
+) -> None:
+    """The brightness endpoint's success log line: the immediate writes it
+    made (a Ramp's own writes are not among them) plus the Transition
+    applied, so a Ramp is traceable even though most of its writes happen
+    later on the worker thread."""
+    transition = model.last_transition
+    logger.info(
+        "endpoint=%s writes=%s target=%s transition=%ss steps=%s outcome=ok",
+        endpoint,
+        model.last_writes,
+        level,
+        transition.seconds,
+        transition.steps,
+    )
+
+
 def _parse_level(raw: Optional[str]) -> Optional[int]:
     """Validate the optional `level` query: an integer 1-100, or None when
     absent. Raises ValueError, with a message fit for a 400 body, otherwise.
@@ -51,6 +69,25 @@ def _parse_level(raw: Optional[str]) -> Optional[int]:
     if not 1 <= level <= 100:
         raise ValueError(f"level must be 1-100, got {level}")
     return level
+
+
+def _parse_transition(raw: Optional[str]) -> Optional[float]:
+    """Validate the optional `transition` query on
+    `/moonhalo/brightness/<value>`: decimal seconds 0-60, or None when
+    absent (the caller then falls back to `config.transition_seconds`).
+    Raises ValueError, with a message fit for a 400 body, otherwise.
+    """
+    if raw is None:
+        return None
+    try:
+        transition = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"transition must be a number of seconds 0-60, got {raw!r}"
+        ) from None
+    if not 0 <= transition <= 60:
+        raise ValueError(f"transition must be a number of seconds 0-60, got {raw!r}")
+    return transition
 
 
 def _parse_brightness(raw: str) -> int:
@@ -163,13 +200,22 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             return jsonify({"ok": False, "error": str(error)}), 400
 
         try:
-            state = model.set_level(level)
+            transition = _parse_transition(request.args.get("transition"))
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
+        try:
+            state = model.set_level(level, transition)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, model.last_writes, "ok")
-        return jsonify({"ok": True, "state": state}), 200
+        _log_brightness_request(logger, endpoint, model, level)
+        return (
+            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
+            200,
+        )
 
     @app.get("/moonhalo/colortemp/<value>")
     def moonhalo_colortemp(value: str):

@@ -22,5 +22,6 @@
   "maker_api_device_id": null,
   "maker_api_token": null,
   "announce_seconds": 60,
-  "announce_enabled": null
+  "announce_enabled": null,
+  "transition_seconds": 0.6
 }

@@ -122,13 +122,14 @@ def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     from .access import WindowsArpTable
     from .config import load_config
     from .http import create_app
+    from .logs import file_logger
     from .model import MoonHaloModel
 
     from werkzeug.serving import make_server
 
     config = load_config(config_path)
     port: DdcPort = make_dry_run_port() if dry_run else WindowsDdcPort(monitor_selector=config.monitor_selector)
-    model = MoonHaloModel(port, config)
+    model = MoonHaloModel(port, config, logger=file_logger("moonhalo_bridge.model", config))
     app = create_app(model, config, arp=WindowsArpTable())
     # Bind before announcing, so a Bridge that cannot take its port never
     # tells the Hub it is up.
