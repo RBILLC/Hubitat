@@ -47,3 +47,21 @@ when the Hub cannot talk to a device directly.
 
 The PC side — installing and running the Bridge itself, its configuration file, and its
 allowlist — is covered in [`Bridges/BenQ_MoonHalo/README.md`](Bridges/BenQ_MoonHalo/README.md).
+
+### Google Home
+
+Hubitat's built-in **Google Home** app accepts the MoonHalo and gives on/off and brightness,
+but no colour-temperature control: as of September 2026 it exposes none for any
+colour-temperature bulb, including Hubitat's own Zigbee and Hue drivers (see
+`docs/research/google-home-colour-temperature.md`). For the white-temperature slider, share the
+device through the community **Google Home Community** app instead (install from Hubitat Package
+Manager; setup in its README at https://github.com/mbudnek/google-home-hubitat-community) with a
+device type defined as:
+
+- **Device type**: Bulb (or Color Temperature); **Google Home device type**: Light.
+- **Traits**: On/Off and Brightness with their defaults; Color Setting with only
+  **Color Temperature Control** set, minimum **2700**, maximum **6500**, attribute
+  `colorTemperature`, command `setColorTemperature`.
+
+Do not share the MoonHalo through both apps at once. The slider settles on the nearest of the
+halo's seven colour steps after each move, which is expected.
