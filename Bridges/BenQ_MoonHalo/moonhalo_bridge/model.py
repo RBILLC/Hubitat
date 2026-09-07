@@ -15,6 +15,12 @@ the move from the Applied brightness step to the Target one across the
 Transition -- run by one background worker thread owned by the model, so
 Target and Applied can differ while a Ramp is in flight. Colour is not
 ramped yet: the Applied colour step always equals the Target's.
+
+A DDC/CI failure mid-Ramp does not fail the Hub's already-answered request
+(see `_perform_ramp_write_locked`): an intermediate write is skipped, but
+the final write gets one retry, and if that also fails the Applied state
+becomes unknown (`_forget_applied_locked`) until the next Ramp reads D9 for
+itself.
 """
 from __future__ import annotations
 
@@ -27,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import Config
-from .ddc import DdcError, DdcPort, MonitorInfo
+from .ddc import DEFAULT_READ_RETRY_DELAY, DdcError, DdcPort, MonitorInfo
 
 _logger = logging.getLogger(__name__)
 
@@ -423,12 +429,27 @@ class MoonHaloModel:
 
     def _resolve_applied_brightness_step_locked(self) -> int:
         """The brightness step currently on the monitor: the tracked
-        Applied step if already known, else resolved the same way
-        `_resolve_brightness_step_locked` resolves brightness for a
-        colour-only write (the remembered Target step, else a fresh D9
-        read, else the configured default) -- cached for next time."""
+        Applied step if already known, else a fresh D9 read (with the
+        existing retry and default fallback -- see `_resolve_d9_half_locked`),
+        cached for next time.
+
+        Deliberately does not fall back to the remembered Target step the
+        way `_resolve_brightness_step_locked` does for a colour-only write:
+        the Applied step is None only at startup with no persisted state
+        (where the Target is equally unknown, so a fresh read is the same
+        thing `_resolve_brightness_step_locked` would do anyway) or after a
+        Ramp's final write failed twice, in which case the Target is
+        exactly the step the monitor may not actually hold -- only a fresh
+        read (or the default) may be trusted.
+        """
         if self._applied_brightness_step is None:
-            self._applied_brightness_step = self._resolve_brightness_step_locked()
+            self._applied_brightness_step = self._resolve_d9_half_locked(
+                None,
+                is_high_byte=False,
+                value_max=10,
+                default=self._config.default_brightness_step,
+                label="applied brightness step",
+            )
         return self._applied_brightness_step
 
     def _ensure_worker_started_locked(self) -> None:
@@ -446,9 +467,10 @@ class MoonHaloModel:
         which releases `self._lock` while waiting) until the next due Ramp
         write, performs it, and loops. A cancelled or retargeted plan is
         simply a different (or absent) `self._ramp_plan` by the time this
-        wakes, which the identity check below catches. A `DdcError` on one
-        write is logged and skipped, so a flaky write never kills the Ramp
-        or this thread.
+        wakes, which the identity check below catches. Write failures are
+        handled by `_perform_ramp_write_locked` (see there for the
+        intermediate-vs-final distinction); this loop only decides what
+        happens next based on whether that write actually landed.
         """
         while True:
             with self._condition:
@@ -464,31 +486,89 @@ class MoonHaloModel:
                 if self._ramp_plan is not plan:
                     continue  # cancelled or replaced while we were waiting
 
+                is_final = plan.next_index == len(plan.steps) - 1
                 value = pack_d9(plan.colortemp_step, brightness_step)
-                try:
-                    self._port.write_vcp(VCP_D9, value)
-                except DdcError as error:
-                    self._logger.warning(
-                        "ramp write failed for target=%d value=0x%04X: %s",
-                        plan.target_brightness_step,
-                        value,
-                        error,
-                    )
-                else:
+                if self._perform_ramp_write_locked(plan, value, is_final):
                     self._applied_brightness_step = brightness_step
                     plan.performed.append((VCP_D9, value))
-
-                plan.next_index += 1
-                if plan.next_index >= len(plan.steps):
-                    elapsed = time.monotonic() - plan.start_time
-                    self._logger.info(
-                        "ramp complete target=%d writes=%s elapsed=%.2fs",
-                        plan.target_brightness_step,
-                        plan.performed,
-                        elapsed,
-                    )
+                    plan.next_index += 1
+                    if plan.next_index >= len(plan.steps):
+                        elapsed = time.monotonic() - plan.start_time
+                        self._logger.info(
+                            "ramp complete target=%d writes=%s elapsed=%.2fs",
+                            plan.target_brightness_step,
+                            plan.performed,
+                            elapsed,
+                        )
+                        if self._ramp_plan is plan:
+                            self._ramp_plan = None
+                elif is_final:
+                    # The final write failed even after its retry (already
+                    # logged, and the Applied state already forgotten, by
+                    # _perform_ramp_write_locked): the Ramp ends here.
                     if self._ramp_plan is plan:
                         self._ramp_plan = None
+                else:
+                    # An intermediate write failed and was skipped (already
+                    # logged); the Ramp carries on towards the target.
+                    plan.next_index += 1
+
+    def _perform_ramp_write_locked(self, plan: _RampPlan, value: int, is_final: bool) -> bool:
+        """Perform one Ramp D9 write, handling a `DdcError` per the ticket:
+        an intermediate write (`is_final` False) that fails is logged at
+        warning and given up on immediately -- the Ramp just skips that
+        hardware step. The final write instead gets one retry, after
+        pausing `DEFAULT_READ_RETRY_DELAY` (the same pause the DDC read
+        retry uses); if the retry also fails, the Ramp aborts: an error is
+        logged naming the writes actually performed, and the Applied state
+        is forgotten (`_forget_applied_locked`), so the next Ramp starts
+        from a fresh D9 read rather than the Target step this write could
+        not reach. Returns whether the value ended up written. Caller holds
+        `self._lock` (via `self._condition`) and is responsible for
+        recording a successful write in `plan.performed` and
+        `self._applied_brightness_step`.
+        """
+        try:
+            self._port.write_vcp(VCP_D9, value)
+            return True
+        except DdcError as error:
+            if not is_final:
+                self._logger.warning(
+                    "ramp write failed for target=%d value=0x%04X: %s",
+                    plan.target_brightness_step,
+                    value,
+                    error,
+                )
+                return False
+            self._logger.warning(
+                "ramp final write failed for target=%d value=0x%04X: %s; retrying",
+                plan.target_brightness_step,
+                value,
+                error,
+            )
+
+        time.sleep(DEFAULT_READ_RETRY_DELAY)
+        try:
+            self._port.write_vcp(VCP_D9, value)
+            return True
+        except DdcError as error:
+            self._logger.error(
+                "ramp aborted target=%d writes=%s error=%s",
+                plan.target_brightness_step,
+                plan.performed,
+                error,
+            )
+            self._forget_applied_locked()
+            return False
+
+    def _forget_applied_locked(self) -> None:
+        """The Applied state is unknown: every `_applied_*` attribute is
+        set to None. Called when a Ramp's final write fails even after its
+        retry, so the next Ramp resolves its starting step from a fresh D9
+        read (see `_resolve_applied_brightness_step_locked`) instead of
+        trusting a Target step the monitor may never have received.
+        Caller holds `self._lock`."""
+        self._applied_brightness_step = None
 
     def set_colortemp(self, step: int, stage: bool = False) -> dict[str, Any]:
         """Set MoonHalo colour temperature to hardware step `step` (1-7).

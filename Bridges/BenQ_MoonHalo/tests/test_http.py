@@ -7,6 +7,7 @@ import json
 import tempfile
 import time
 import unittest
+from typing import Optional
 
 from moonhalo_bridge import __version__
 from pathlib import Path
@@ -69,6 +70,37 @@ class FailOnceDdcPort(FakeDdcPort):
         if not self._failed and code == VCP_D9 and value == self._fail_value:
             self._failed = True
             raise DdcError("simulated ramp write failure")
+        super().write_vcp(code, value)
+
+
+class FailingWritesDdcPort(FakeDdcPort):
+    """A FakeDdcPort whose write_vcp raises for scripted D9 values a fixed
+    number of times, and which logs every `read_vcp` code -- the Ramp
+    equivalent of `fail_reads` -- for exercising a Ramp's final-write retry
+    (issue #34) and the fresh D9 read that follows an aborted Ramp.
+
+    `fail_writes` maps D9 value -> a count of scripted write failures still
+    owed for that value; each write of that value consumes one failure
+    before falling through to a real write, mirroring `FakeDdcPort.fail_reads`.
+    `reads` records every VCP code passed to `read_vcp`, in call order, so a
+    test can assert a command read D9 before making its first write.
+    """
+
+    def __init__(self, *args, fail_writes: Optional[dict[int, int]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fail_writes: dict[int, int] = dict(fail_writes) if fail_writes else {}
+        self.reads: list[int] = []
+
+    def read_vcp(self, code: int) -> tuple[int, int]:
+        self.reads.append(code)
+        return super().read_vcp(code)
+
+    def write_vcp(self, code: int, value: int) -> None:
+        if code == VCP_D9:
+            remaining = self.fail_writes.get(value, 0)
+            if remaining > 0:
+                self.fail_writes[value] = remaining - 1
+                raise DdcError(f"simulated write failure for D9 value 0x{value:04X}")
         super().write_vcp(code, value)
 
 
@@ -491,6 +523,101 @@ class TestRampWriteFailure(HttpTestCase):
         # 9 writes were planned; the one for step 5 raised and was skipped.
         self.assertEqual(len(self.port.writes), 8)
         self.assertTrue(any("ramp write failed" in message for message in logs.output))
+
+
+class TestRampFinalWriteFailure(HttpTestCase):
+    """Issue #34: a Ramp survives a DDC/CI failure mid-way. The final write
+    of a Ramp gets a retry the intermediate writes do not; if the retry
+    also fails the Ramp aborts and the Applied state becomes unknown, so
+    the next command reads D9 fresh instead of trusting the stale Target.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config = make_config(self.tmp_dir)
+        # The last of the 9 writes a 1 -> 100 (step 1 -> step 10) Ramp plans.
+        self.final_value = pack_d9(self.config.default_colortemp_step, 10)
+        self.port = FailingWritesDdcPort()
+        self.model = MoonHaloModel(self.port, self.config)
+        self.app = create_app(self.model, self.config)
+        self.app.testing = True
+        self.client = self.app.test_client()
+
+    def _start_at_level(self, level: int) -> None:
+        """Drive the halo to `level`'s hardware step with transition=0 (no
+        scripted failures armed yet), then clear the setup write(s)."""
+        response = self.client.get(f"/moonhalo/brightness/{level}?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.port.writes.clear()
+
+    def test_final_write_failing_once_is_retried_and_lands(self):
+        self._start_at_level(1)  # step 1
+        self.port.fail_writes = {self.final_value: 1}
+
+        with self.assertLogs("moonhalo_bridge.model", level="INFO") as logs:
+            response = self.client.get("/moonhalo/brightness/100?transition=0.6")  # step 10
+            self.assertEqual(response.status_code, 200)
+            writes = _wait_for_writes(self.port, 9)
+
+        # All 9 planned writes land, ending on the target -- the failed
+        # attempt was retried rather than skipped like an intermediate one.
+        self.assertEqual(len(writes), 9)
+        self.assertEqual(writes[-1], (VCP_D9, self.final_value))
+
+        warning_lines = [line for line in logs.output if "WARNING" in line]
+        self.assertEqual(len(warning_lines), 1)
+        complete_lines = [line for line in logs.output if "ramp complete" in line]
+        self.assertEqual(len(complete_lines), 1)
+        self.assertIn("target=10", complete_lines[0])
+        self.assertIn(f"writes={writes}", complete_lines[0])
+
+    def test_final_write_failing_twice_aborts_and_forgets_applied(self):
+        self._start_at_level(1)  # step 1
+        self.port.fail_writes = {self.final_value: 2}
+
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING") as logs:
+            response = self.client.get("/moonhalo/brightness/100?transition=0.6")  # step 10
+            self.assertEqual(response.status_code, 200)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and len(self.port.writes) < 8:
+                time.sleep(0.01)
+            time.sleep(0.2)  # give the failed retry time to (not) write again
+
+        # 9 writes were planned; the 8 before the target land, the target
+        # itself never does -- neither the first attempt nor the retry.
+        self.assertEqual(len(self.port.writes), 8)
+        performed = list(self.port.writes)
+
+        abort_lines = [line for line in logs.output if "ramp aborted" in line]
+        self.assertEqual(len(abort_lines), 1)
+        self.assertIn("target=10", abort_lines[0])
+        self.assertIn(f"writes={performed}", abort_lines[0])
+        self.assertFalse(any("ramp complete" in line for line in logs.output))
+
+        # The Applied state is now unknown. Make the monitor's register hold
+        # a step distinct from both the 8 landed writes and the failed
+        # target of 10, so the next command can only be planning from a
+        # fresh read of it, not from the stale Target step of 10.
+        self.port.registers[VCP_D9] = (pack_d9(self.config.default_colortemp_step, 3), 100)
+        self.port.reads.clear()
+
+        response = self.client.get("/moonhalo/brightness/80?transition=0.6")  # step 8
+        self.assertEqual(response.status_code, 200)
+
+        # The read happens synchronously while resolving the Applied step,
+        # inside the request handler, strictly before the plan (and so the
+        # first Ramp write) is even computed -- the write sequence checked
+        # below is the proof: it could only start from the register's step
+        # 3 if this read's value was what got used.
+        self.assertIn(VCP_D9, self.port.reads)
+
+        new_writes = _wait_for_writes(self.port, len(performed) + 5)[len(performed):]
+        # Starting from the register's step 3 towards target step 8 over
+        # 0.6s gives 5 writes counting up 4, 5, 6, 7, 8; starting from the
+        # stale Target step of 10 would instead count down from 9.
+        self.assertEqual([value & 0xFF for _, value in new_writes], [4, 5, 6, 7, 8])
 
 
 class TestBrightnessTransitionLogging(HttpTestCase):
