@@ -30,11 +30,22 @@
  * - No hardware knowledge lives here: no VCP registers, no step maths. The
  *   only hardware-shaped value is the 1-7 step passed through by
  *   setColorTempStep.
+ * - The Bridge announces its own LAN address through the Maker API by calling
+ *   setBridgeAddress(ip, port) at startup and then every minute. The announced
+ *   address is used in preference to the typed Bridge IP, which only matters
+ *   until the first announcement arrives. Once an announcement has arrived, a
+ *   once-a-minute check marks the Bridge offline when nothing has been heard
+ *   from it (no announcement and no reply) for longer than the announcement
+ *   timeout. Changing the typed IP or port forgets the announced address
+ *   until the next announcement; saving other preferences keeps it.
  *
- * Version: 0.0.7 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.8 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-07 0.0.8 - setBridgeAddress(ip, port) command and bridgeAddress attribute: the Bridge
+ *                    announces its LAN address through the Maker API, the Driver prefers it over
+ *                    the typed IP, and a missed announcement marks the Bridge offline (issue #23)
  * 2026-09-07 0.0.7 - on() sends /moonhalo/on and lets the Bridge restore its remembered level;
  *                    the Driver's own lastLevel copy is gone. Google Home sends setLevel then
  *                    on() for one slider move, and on() replayed the stale level (issue #21)
@@ -69,13 +80,19 @@ metadata {
 
 
         attribute "connectionState", "enum", ["unknown", "online", "offline"]
+        attribute "bridgeAddress", "string"
 
         command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware colour temperature step, 1 (warm) to 7 (cool)"]]
+        command "setBridgeAddress", [
+            [name: "IP address*", type: "STRING", description: "IPv4 address the Bridge is listening on; sent by the Bridge itself through the Maker API"],
+            [name: "Port*", type: "NUMBER", description: "TCP port the Bridge is listening on, 1-65535"]
+        ]
     }
 
     preferences {
-        input name: "bridgeIp", type: "text", title: "Bridge IP address", description: "IPv4 address of the PC running the MoonHalo Bridge", required: true
-        input name: "bridgePort", type: "number", title: "Bridge port", defaultValue: 5000, range: "1..65535"
+        input name: "bridgeIp", type: "text", title: "Bridge IP address (initial)", description: "IPv4 address of the PC running the MoonHalo Bridge; used only until the Bridge announces its own address", required: true
+        input name: "bridgePort", type: "number", title: "Bridge port (initial)", defaultValue: 5000, range: "1..65535"
+        input name: "announceTimeoutSec", type: "number", title: "Announcement timeout (seconds)", description: "Once the Bridge has announced its address, mark it offline when nothing has been heard from it for this long; 0 disables the check. Must exceed the Bridge's announce_seconds", defaultValue: 200, range: "0..86400"
         input name: "timeoutSec", type: "number", title: "Request timeout (seconds)", defaultValue: 5, range: "1..30"
         input name: "pollMinutes", type: "enum", title: "Poll interval", description: "How often the Hub asks the Bridge for its status", options: [["0": "Disabled"], ["1": "1 minute"], ["5": "5 minutes"], ["10": "10 minutes"], ["15": "15 minutes"], ["30": "30 minutes"]], defaultValue: "5"
         input name: "ctMinKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
@@ -100,6 +117,7 @@ void updated() {
     log.info "updated..."
     log.warn "Bridge IP is: ${settings.bridgeIp}"
     log.warn "Bridge port is: ${prefInt('bridgePort', 5000)}"
+    log.warn "announcement timeout is: ${announceTimeout()}s (0 = disabled)"
     log.warn "request timeout is: ${prefInt('timeoutSec', 5)}s"
     log.warn "poll interval is: ${settings.pollMinutes} minutes (0 = disabled)"
     log.warn "warm colour temperature is: ${prefInt('ctMinKelvin', 2700)}K"
@@ -109,15 +127,37 @@ void updated() {
     log.warn "description logging is: ${txtEnable == true}"
     purgeStaleAttributes()
     state.remove("lastLevel")
+    forgetAnnouncedAddressIfTypedChanged()
     unschedule()
     schedulePoll()
+    scheduleAnnounceCheck()
     if (logEnable) runIn(1800, "logsOff")
     runIn(2, "refresh")
+}
+
+// Retyping the Bridge IP or port drops the announced address so the typed
+// one applies again until the Bridge's next announcement (within a minute):
+// the way out of a stale announced address once the announcer is switched
+// off. Saving any other preference leaves the announced address alone, so a
+// save never sends commands to a typed address that has gone stale.
+private void forgetAnnouncedAddressIfTypedChanged() {
+    String typed = "${(settings.bridgeIp ?: '').toString().trim()}:${prefInt('bridgePort', 5000)}"
+    String previous = state.typedAddress?.toString()
+    state.typedAddress = typed
+    if (previous == null || previous == typed) return
+    if (state.bridgeIp != null || state.bridgePort != null) {
+        logDebug "typed address changed to ${typed}; announced address ${state.bridgeIp}:${state.bridgePort} forgotten until the next announcement"
+    }
+    state.remove("bridgeIp")
+    state.remove("bridgePort")
+    state.remove("lastAnnounceAt")
+    state.remove("lastSeenAt")
 }
 
 // Called from installed(); the status poll covers hub restarts.
 void initialize() {
     logDebug "initialize()"
+    scheduleAnnounceCheck()
     runIn(10, "refresh")
 }
 
@@ -167,6 +207,18 @@ private void schedulePoll() {
         default:
             logDebug "polling disabled"
     }
+}
+
+private void scheduleAnnounceCheck() {
+    if (announceTimeout() > 0) {
+        runEvery1Minute("checkAnnounce")
+    } else {
+        logDebug "announcement timeout disabled"
+    }
+}
+
+private Integer announceTimeout() {
+    return limitIntegerRange(prefInt("announceTimeoutSec", 200), 0, 86400)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +299,67 @@ void refresh() {
     sendBridge("/moonhalo/status", [command: "refresh"])
 }
 
+// ---------------------------------------------------------------------------
+// Bridge address announcements (Maker API)
+// ---------------------------------------------------------------------------
+
+// Called by the Bridge through the Maker API: GET
+// /apps/api/<app>/devices/<device>/setBridgeAddress/<ip>,<port>?access_token=...
+// Stores the address for sendBridge(), stamps the announcement time for
+// checkAnnounce(), and counts as proof the Bridge is up.
+void setBridgeAddress(ip, port) {
+    logDebug "setBridgeAddress(${ip}, ${port})"
+    String address = (ip ?: "").toString().trim()
+    if (!isIpv4(address)) {
+        log.warn "${device.displayName}: setBridgeAddress ignored, '${ip}' is not an IPv4 address"
+        return
+    }
+    Integer bridgePort = asInteger(port)
+    if (bridgePort == null || bridgePort < 1 || bridgePort > 65535) {
+        log.warn "${device.displayName}: setBridgeAddress ignored, '${port}' is not a port (1-65535)"
+        return
+    }
+    String announced = "${address}:${bridgePort}"
+    Boolean changed = device.currentValue("bridgeAddress") != announced
+    Boolean first = (state.lastAnnounceAt == null)
+    state.bridgeIp = address
+    state.bridgePort = bridgePort
+    state.lastAnnounceAt = now()
+    state.lastSeenAt = state.lastAnnounceAt
+    emitEvent("bridgeAddress", announced, null, "${device.displayName} bridgeAddress ${changed ? 'was set to' : 'is'} ${announced}", changed)
+    markOnline()
+    // A driver-code update alone never runs updated(), so the first
+    // announcement after one arms the check itself.
+    if (first) scheduleAnnounceCheck()
+}
+
+// Scheduled once a minute while the announcement timeout is enabled. Judges
+// liveness by the last time anything was heard from the Bridge, announcement
+// or reply, so announcements stopping while commands still work (announcer
+// switched off, token changed) never fight the successful replies. Nothing
+// happens until the first announcement has arrived, so a Bridge without the
+// Maker API values is judged by the status poll alone.
+void checkAnnounce() {
+    Integer timeout = announceTimeout()
+    if (timeout <= 0) return
+    if (state.lastAnnounceAt == null) {
+        logDebug "no announcement received yet"
+        return
+    }
+    Long last = asLong(state.lastSeenAt) ?: asLong(state.lastAnnounceAt)
+    Long age = (now() - last).intdiv(1000L)
+    if (age > timeout) {
+        markOffline("nothing heard from the Bridge for ${age}s, limit ${timeout}s")
+    } else {
+        logDebug "last heard from the Bridge ${age}s ago"
+    }
+}
+
+private Boolean isIpv4(String text) {
+    if (!text) return false
+    return text.matches('^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$')
+}
+
 // "?stage=1" when colour pre-staging is on and the MoonHalo is not on:
 // the Bridge then stores the colour without powering the halo.
 private String stageQuery() {
@@ -260,15 +373,17 @@ private String stageQuery() {
 
 // One asynchronous GET to the Bridge. Never blocks; a thrown exception
 // (bad URI, hub refusing the request) counts as the Bridge being offline.
+// The address the Bridge announced wins over the typed preferences.
 private void sendBridge(String path, Map data) {
     Map callbackData = (data ?: [:])
     String command = callbackData.command ?: "request"
-    String ip = (settings.bridgeIp ?: "").toString().trim()
+    String ip = (state.bridgeIp ?: settings.bridgeIp ?: "").toString().trim()
     if (!ip) {
         log.warn "${device.displayName}: Bridge IP address is not set, ${command} ignored"
         return
     }
-    Integer port = limitIntegerRange(prefInt("bridgePort", 5000), 1, 65535)
+    Integer announcedPort = asInteger(state.bridgePort)
+    Integer port = limitIntegerRange((announcedPort != null) ? announcedPort : prefInt("bridgePort", 5000), 1, 65535)
     Integer timeout = limitIntegerRange(prefInt("timeoutSec", 5), 1, 30)
     String uri = "http://${ip}:${port}${path}"
     callbackData = callbackData + [uri: uri]
@@ -434,9 +549,6 @@ private void emitEvent(String name, value, String unit, String descriptionText, 
 // Offline is how a MoonHalo whose PC is powered down is shown. The warning
 // is logged once, on the transition; repeats go to debug. switch and level
 // are never touched here.
-// Offline is how a MoonHalo whose PC is powered down is shown. The warning
-// is logged once, on the transition; repeats go to debug. switch and level
-// are never touched here.
 private void markOffline(String reason) {
     String current = device.currentValue("connectionState", true)
     if (current != "offline") {
@@ -449,6 +561,7 @@ private void markOffline(String reason) {
 }
 
 private void markOnline() {
+    state.lastSeenAt = now()
     String current = device.currentValue("connectionState", true)
     if (current != "online") {
         String descriptionText = "${device.displayName} connectionState was set to online"
@@ -478,6 +591,18 @@ private Integer asInteger(value) {
     if (!text) return null
     try {
         return new BigDecimal(text).intValue()
+    } catch (Exception e) {
+        return null
+    }
+}
+
+// Long from a state value (Long, Integer, BigDecimal or String); null when
+// it cannot be read as a number.
+private Long asLong(value) {
+    if (value == null) return null
+    if (value instanceof Number) return ((Number) value).longValue()
+    try {
+        return new BigDecimal(value.toString().trim()).longValue()
     } catch (Exception e) {
         return null
     }

@@ -33,7 +33,14 @@ when the Hub cannot talk to a device directly.
 
 ### BenQ MoonHalo Bridge preferences
 
-- **Bridge IP address** and **Bridge port** — where the Bridge listens (default port 5000).
+- **Bridge IP address (initial)** and **Bridge port (initial)** — where the Bridge listens
+  (default port 5000). Once the Bridge has announced its own address (see below) these are
+  used again only after you retype them, until the next announcement.
+- **Announcement timeout (seconds)** — once the Bridge has announced its address, how long the
+  Hub waits without hearing from it (no announcement and no reply) before marking it offline
+  (default 200, three missed minutes; 0 disables the check). Must exceed the Bridge's
+  `announce_seconds`. Until the first announcement ever arrives, only the status poll judges
+  the Bridge.
 - **Request timeout (seconds)** — how long the Hub waits for the Bridge before treating it as
   offline.
 - **Poll interval** — how often the Hub asks the Bridge for its status when no command has been
@@ -44,6 +51,20 @@ when the Hub cannot talk to a device directly.
   instead of turning it on.
 - **Enable debug logging** and **Enable description text logging** — as in Hubitat's other
   drivers; debug logging turns itself off after 30 minutes.
+
+#### Letting the Bridge announce its address
+
+The PC's address can change (DHCP, joining or leaving a VPN). Instead of a DHCP reservation,
+the Bridge announces its current LAN address to the Hub through the **Maker API** app: it
+calls the Driver's `setBridgeAddress(ip, port)` command when it starts, every minute, and
+within a few seconds of its address changing. The Driver stores the announced address, shows it
+in the `bridgeAddress` attribute as `ip:port`, prefers it over the typed preferences, and marks
+`connectionState` offline when nothing has been heard from the Bridge for longer than the
+announcement timeout (one warning in the log, then debug lines). Retyping the IP or port
+forgets the announced address until the next announcement; saving other preferences keeps it.
+The command is meant for the Bridge, but it can be run from the device page to point the
+Driver at an address by hand. The Maker API setup is described in the Bridge README's
+"Letting the Hub find the Bridge" section.
 
 The PC side — installing and running the Bridge itself, its configuration file, and its
 allowlist — is covered in [`Bridges/BenQ_MoonHalo/README.md`](Bridges/BenQ_MoonHalo/README.md).

@@ -11,6 +11,11 @@ All docs2.hubitat.com facts below come from a live browser render (docs2 is a JS
 returns the page `<title>`). Anything not found in the sources consulted is labeled as such rather than
 guessed.
 
+**Status (2026-09-07): the port-39501 design recommended below was superseded.** The maintainer's review on
+issue #22 found that a MAC-keyed network ID breaks when the PC switches adapters and that 39501 is TCP, so
+the Bridge announces through the Maker API instead; see the final section, "Superseded: Maker API
+announcement (implemented in issue #23)". Sections 1-7 stay as the record of what was checked.
+
 ## One-paragraph answer
 
 The candidate design is sound and matches how several real Hubitat LAN drivers solve exactly this problem,
@@ -352,3 +357,43 @@ treating UDP-to-39501 as more appropriate than HTTP for the announcement.
 6. **Whether Hubitat exposes any documented mechanism for a LAN device to discover the Hub's own IP**
    (SSDP, `/hub/details`, or similar) — no such page was found in this research pass; the recommended
    design sidesteps this by making the Hub's IP a Bridge-side config value instead.
+
+## Superseded: Maker API announcement (implemented in issue #23)
+
+Decision recorded on issue #22 (maintainer review, 2026-09-04): the Bridge calls the Driver's custom
+command `setBridgeAddress(ip, port)` through the Maker API instead of pushing to port 39501. This is the
+documented inbound path for an external service, works from any IP and adapter, and needs no
+device-network-ID handling.
+
+**Multi-parameter command URLs, documented by Hubitat staff.** Bruce Ravenel (bravenel, Hubitat staff),
+"Maker API New Features", https://community.hubitat.com/t/25634:
+
+> Multiple parameters to device commands. When sending a command to a device via an endpoint, it is now
+> possible to specify multiple parameters for the command. These parameters go in the [Secondary value]
+> field of the endpoint, and are separated by commas. [...] Parameters may be integers, decimals, or
+> strings, and it is up to the user to ensure that the correct parameter types are used.
+
+His example: `http://192.168.1.156/apps/api/3845/devices/1321/setCode/3,4321,Guest?access_token=...`.
+The Bridge therefore sends
+
+```
+GET http://<hub_ip>/apps/api/<app>/devices/<device>/setBridgeAddress/<ip>,<port>?access_token=<token>
+```
+
+The older thread "Maker API - how call commands with 2 or more arguments"
+(https://community.hubitat.com/t/19322, 2019) predates that feature and says multiple parameters were
+not supported; it is obsolete.
+
+**Maker API app facts used** (the docs2 Maker API page could not be fetched as text; these come from the
+app's own configuration page on the Hub, which shows its example URLs): the app id is the number after
+`/apps/api/` in every example URL; the access token is the `access_token` query value; device ids come
+from the "Get All Devices" endpoint; "Allow Access via Local IP Address" must be on for a LAN caller.
+
+**Bridge-side LAN address** (Python docs, `socket.connect` on a UDP socket followed by `getsockname()`):
+connecting a datagram socket only selects a route and binds a local address, no packet is sent. The Bridge
+uses this against `hub_ip`, so an overlay adapter (Tailscale) is never chosen; a `host` config value that
+names an interface is announced as typed instead.
+
+**Inferred, not documented**: that Maker API passes a STRING parameter to the driver as a String and a
+NUMBER as a numeric type. The Driver parses both defensively (`asInteger`, IPv4 regex), so either way
+works; the hub acceptance test on #23 confirms it.
