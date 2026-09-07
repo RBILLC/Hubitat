@@ -7,14 +7,18 @@ colour step (1-7) and low byte brightness step (1-10); every D9 write sends
 both halves, using the remembered value for whichever half is not changing.
 
 Two states matter here (see CONTEXT.md's glossary): the **Target state**
-(`MoonHaloState`, persisted, unchanged by this ticket) is what was most
-recently commanded and what every reply reports; the **Applied state** is
-what the monitor was last actually written with. A brightness change with a
-non-zero Transition schedules a **Ramp** -- a series of D9 writes spreading
-the move from the Applied brightness step to the Target one across the
-Transition -- run by one background worker thread owned by the model, so
-Target and Applied can differ while a Ramp is in flight. Colour is not
-ramped yet: the Applied colour step always equals the Target's.
+(`MoonHaloState`, persisted) is what was most recently commanded and what
+every reply reports; the **Applied state** is what the monitor was last
+actually written with, tracked as one hardware step per byte
+(`_applied_colortemp_step`, `_applied_brightness_step`). A brightness or
+colour change with a non-zero Transition schedules a **Ramp** -- a series
+of D9 writes spreading the move from the Applied state to the Target one
+across the Transition, both bytes interpolated together so a combined move
+(brightness and colour changing at once) is one sequence of writes -- run
+by one background worker thread owned by the model, so Target and Applied
+can differ while a Ramp is in flight. A newer command retargets the plan
+from wherever the Applied state currently is, rather than restarting it;
+a command whose Target already matches a Ramp in flight leaves it alone.
 """
 from __future__ import annotations
 
@@ -82,20 +86,21 @@ class Transition:
 
 @dataclass
 class _RampPlan:
-    """A brightness Ramp in flight, owned by the worker thread.
+    """A brightness/colour Ramp in flight, owned by the worker thread.
 
     `steps` is every write the Ramp makes, in order, each a `(due_at,
-    brightness_step)` pair with `due_at` a `time.monotonic()` deadline;
-    `next_index` is the index of the next one not yet performed. `colortemp_step`
-    is fixed for the life of the plan (colour is not ramped yet). `performed`
-    records the writes actually made (a failed write is skipped, not
-    recorded) for the completion log line.
+    colortemp_step, brightness_step)` triple with `due_at` a
+    `time.monotonic()` deadline; `next_index` is the index of the next one
+    not yet performed. `target_colortemp_step` and `target_brightness_step`
+    are the Ramp's destination on each axis, for the completion/cancel log
+    lines. `performed` records the writes actually made (a failed write is
+    skipped, not recorded) for the completion log line.
     """
 
-    colortemp_step: int
+    target_colortemp_step: int
     target_brightness_step: int
     transition_seconds: float
-    steps: list[tuple[float, int]]
+    steps: list[tuple[float, int, int]]
     start_time: float
     next_index: int = 0
     performed: list[tuple[int, int]] = field(default_factory=list)
@@ -206,11 +211,13 @@ class MoonHaloModel:
         #: The Transition the most recently completed call reported, for
         #: the HTTP layer's brightness reply.
         self.last_transition: Transition = Transition(seconds=0.0, steps=1)
-        #: Applied brightness step (see the module docstring): the Target's
-        #: remembered step to start, resolved lazily (D9 read + default
-        #: fallback) the first time it is needed and unknown -- see
-        #: `_resolve_applied_brightness_step_locked`.
+        #: Applied brightness/colour steps (see the module docstring): the
+        #: Target's remembered step to start, resolved lazily (D9 read +
+        #: default fallback) the first time either is needed and unknown --
+        #: see `_resolve_applied_brightness_step_locked` and
+        #: `_resolve_applied_colortemp_step_locked`.
         self._applied_brightness_step: Optional[int] = self._state.brightness_step
+        self._applied_colortemp_step: Optional[int] = self._state.colortemp_step
         self._ramp_plan: Optional[_RampPlan] = None
         self._worker_thread: Optional[threading.Thread] = None
 
@@ -271,9 +278,8 @@ class MoonHaloModel:
         """Set MoonHalo brightness to `level` (0-100) over `transition`
         seconds (default `config.transition_seconds`). Level 0 delegates to
         `turn_off` (a snap; `transition` is ignored). Otherwise powers on
-        first if not already on, then either writes the new brightness step
-        immediately (a `transition` of 0, or a change of at most one
-        hardware step) or plans a Ramp -- see `_plan_brightness_locked`.
+        first if not already on, then goes through the shared planner (see
+        `_plan_move_locked`), keeping the current Target colour step.
         """
         if level == 0:
             return self.turn_off()
@@ -281,7 +287,9 @@ class MoonHaloModel:
             resolved_transition = (
                 self._config.transition_seconds if transition is None else transition
             )
-            return self._plan_brightness_locked(level, resolved_transition)
+            return self._plan_move_locked(
+                None, level_to_brightness_step(level), resolved_transition, last_level=level
+            )
 
     def _apply_level_locked(self, level: int) -> dict[str, Any]:
         """Shared body of `turn_on` once a concrete level 1-100 is known:
@@ -290,72 +298,111 @@ class MoonHaloModel:
         writes: list[tuple[int, int]] = []
         self._ensure_power_on_locked(writes)
         self._cancel_ramp_locked()
-        return self._write_brightness_now_locked(
+        return self._write_move_now_locked(
             self._resolve_colortemp_step_locked(),
             level_to_brightness_step(level),
-            level,
             writes,
             transition_seconds=0.0,
+            last_level=level,
         )
 
-    def _write_brightness_now_locked(
+    def _write_move_now_locked(
         self,
         colortemp_step: int,
-        target_step: int,
-        level: int,
+        brightness_step: int,
         writes: list[tuple[int, int]],
         transition_seconds: float,
+        last_level: Optional[int],
     ) -> dict[str, Any]:
-        """Perform one synchronous D9 write to `target_step`, used by
-        `_plan_brightness_locked` both when `transition_seconds` is 0 and
-        when the change is too small to ramp. `writes` already holds any
-        immediate D7 write; `transition_seconds` is echoed back in
-        `last_transition` even though only one write happens. Caller holds
-        `self._lock`."""
-        d9_value = pack_d9(colortemp_step, target_step)
+        """Perform one synchronous D9 write to `(colortemp_step,
+        brightness_step)`, used by `_plan_move_locked` when
+        `transition_seconds` is 0, the move collapses to one write, or
+        there is no delta on either axis -- and by `_apply_level_locked`
+        (`turn_on` is always a snap). `writes` already holds any immediate
+        D7 write; `transition_seconds` is echoed back in `last_transition`
+        even though only one write happens. `last_level`, when given,
+        replaces the remembered Level. Caller holds `self._lock`."""
+        d9_value = pack_d9(colortemp_step, brightness_step)
         self._port.write_vcp(VCP_D9, d9_value)
         writes.append((VCP_D9, d9_value))
 
-        self._applied_brightness_step = target_step
-        self._state.brightness_step = target_step
+        self._applied_colortemp_step = colortemp_step
+        self._applied_brightness_step = brightness_step
         self._state.colortemp_step = colortemp_step
-        self._state.last_level = level
+        self._state.brightness_step = brightness_step
+        if last_level is not None:
+            self._state.last_level = last_level
         self.last_writes = writes
         self.last_transition = Transition(seconds=float(transition_seconds), steps=1)
         self._save_state()
         return self._status_locked()
 
-    def _plan_brightness_locked(self, level: int, transition_seconds: float) -> dict[str, Any]:
-        """Reach `level`'s hardware step, given `transition_seconds`, either
-        synchronously or by (re)planning a Ramp. Caller holds `self._lock`.
+    def _plan_move_locked(
+        self,
+        new_colortemp_step: Optional[int],
+        new_brightness_step: Optional[int],
+        transition_seconds: float,
+        *,
+        last_level: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Reach a new Target, given `transition_seconds`, either
+        synchronously or by (re)planning a Ramp from the current Applied
+        state. Shared by `set_level` and `set_colortemp`. Caller holds
+        `self._lock`.
 
-        - A command whose target already equals a Ramp already in flight
-          leaves that Ramp completely untouched: no new writes, and the
-          reply reports the running Ramp's own Transition. (Retargeting to
-          a *different* level below replaces the plan instead, and an
-          explicit `transition_seconds` of 0 snaps to the target at once.)
-        - `transition_seconds == 0`, or a change of at most one hardware
-          step, writes once, synchronously -- exactly as before this
-          ticket other than tracking the Applied step.
-        - Otherwise a Ramp is planned from the current Applied step to the
-          Target step, dropping intermediate hardware steps evenly so no
-          write is scheduled closer than `WRITE_FLOOR_SECONDS` to the last.
+        Exactly one of `new_colortemp_step` / `new_brightness_step` is the
+        axis being commanded; the other is `None`, meaning "keep the
+        current Target", resolved here the same way a colour- or
+        brightness-only write always has (`_resolve_colortemp_step_locked`
+        / `_resolve_brightness_step_locked`). `last_level`, given by
+        `set_level`, replaces the remembered Level outright; left `None`
+        (by `set_colortemp`), the remembered Level is instead derived from
+        the brightness step kept, the first time it is not yet known.
+
+        - A command whose Target already equals a Ramp already in flight
+          on *both* axes leaves that Ramp completely untouched: no new
+          writes, and the reply reports the running Ramp's own Transition.
+          (A command that changes either axis retargets the plan instead,
+          and an explicit `transition_seconds` of 0 always snaps.)
+        - `transition_seconds == 0`, or no delta on either axis, writes
+          once, synchronously.
+        - Otherwise a Ramp is planned from the current Applied state to
+          the new Target: the step count is the larger of the two axes'
+          deltas in hardware steps, both bytes interpolated linearly
+          across it and rounded, dropping intermediate steps evenly so no
+          write is scheduled closer than `WRITE_FLOOR_SECONDS` to the last
+          -- so a Ramp already running is retargeted (continuing from
+          wherever it has reached) rather than restarted, and a lone
+          colour change or one landing mid-brightness-Ramp both become one
+          combined sequence of D9 writes.
         """
-        target_step = level_to_brightness_step(level)
+        target_colortemp_step = (
+            new_colortemp_step
+            if new_colortemp_step is not None
+            else self._resolve_colortemp_step_locked()
+        )
+        target_brightness_step = (
+            new_brightness_step
+            if new_brightness_step is not None
+            else self._resolve_brightness_step_locked()
+        )
+        if last_level is None and self._state.last_level is None:
+            last_level = brightness_step_to_level(target_brightness_step)
 
         if (
             self._ramp_plan is not None
-            and target_step == self._state.brightness_step
+            and target_colortemp_step == self._state.colortemp_step
+            and target_brightness_step == self._state.brightness_step
             and transition_seconds != 0
         ):
             # An explicit 0 is a request to snap, so it falls through to
             # cancel the Ramp and write the target at once.
             plan = self._ramp_plan
-            if self._state.last_level != level:
-                # Same hardware step, different Level (95 and 100 both land
-                # on step 10): the Ramp is untouched but status must report
-                # the Level last commanded.
-                self._state.last_level = level
+            if last_level is not None and self._state.last_level != last_level:
+                # Same hardware steps, different Level (95 and 100 both
+                # land on brightness step 10): the Ramp is untouched but
+                # status must report the Level last commanded.
+                self._state.last_level = last_level
                 self._save_state()
             self.last_writes = []
             self.last_transition = Transition(
@@ -367,39 +414,47 @@ class MoonHaloModel:
         self._ensure_power_on_locked(writes)
         self._cancel_ramp_locked()
 
-        colortemp_step = self._resolve_colortemp_step_locked()
-        applied_step = self._resolve_applied_brightness_step_locked()
-        steps_delta = abs(target_step - applied_step)
+        applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
+        applied_brightness_step = self._resolve_applied_brightness_step_locked()
+        colour_delta = target_colortemp_step - applied_colortemp_step
+        brightness_delta = target_brightness_step - applied_brightness_step
+        steps_delta = max(abs(colour_delta), abs(brightness_delta))
 
         step_count = 1
-        if transition_seconds != 0 and steps_delta > 1:
+        if transition_seconds != 0 and steps_delta > 0:
             step_count = max(1, min(steps_delta, int(transition_seconds // WRITE_FLOOR_SECONDS)))
 
         if step_count <= 1:
-            return self._write_brightness_now_locked(
-                colortemp_step, target_step, level, writes, transition_seconds
+            return self._write_move_now_locked(
+                target_colortemp_step,
+                target_brightness_step,
+                writes,
+                transition_seconds,
+                last_level,
             )
 
         now = time.monotonic()
         plan_steps = [
             (
                 now + (k * transition_seconds / (step_count - 1)),
-                round(applied_step + (target_step - applied_step) * (k + 1) / step_count),
+                round(applied_colortemp_step + colour_delta * (k + 1) / step_count),
+                round(applied_brightness_step + brightness_delta * (k + 1) / step_count),
             )
             for k in range(step_count)
         ]
         self._ramp_plan = _RampPlan(
-            colortemp_step=colortemp_step,
-            target_brightness_step=target_step,
+            target_colortemp_step=target_colortemp_step,
+            target_brightness_step=target_brightness_step,
             transition_seconds=transition_seconds,
             steps=plan_steps,
             start_time=now,
         )
         self._ensure_worker_started_locked()
 
-        self._state.brightness_step = target_step
-        self._state.colortemp_step = colortemp_step
-        self._state.last_level = level
+        self._state.colortemp_step = target_colortemp_step
+        self._state.brightness_step = target_brightness_step
+        if last_level is not None:
+            self._state.last_level = last_level
         self.last_writes = writes
         self.last_transition = Transition(seconds=float(transition_seconds), steps=step_count)
         self._save_state()
@@ -414,8 +469,9 @@ class MoonHaloModel:
         if plan is not None:
             self._ramp_plan = None
             self._logger.info(
-                "ramp cancelled target=%d writes=%s elapsed=%.2fs",
+                "ramp cancelled target=%d colour=%d writes=%s elapsed=%.2fs",
                 plan.target_brightness_step,
+                plan.target_colortemp_step,
                 plan.performed,
                 time.monotonic() - plan.start_time,
             )
@@ -430,6 +486,16 @@ class MoonHaloModel:
         if self._applied_brightness_step is None:
             self._applied_brightness_step = self._resolve_brightness_step_locked()
         return self._applied_brightness_step
+
+    def _resolve_applied_colortemp_step_locked(self) -> int:
+        """The colour step currently on the monitor: the tracked Applied
+        step if already known, else resolved the same way
+        `_resolve_colortemp_step_locked` resolves colour for a
+        brightness-only write (the remembered Target step, else a fresh D9
+        read, else the configured default) -- cached for next time."""
+        if self._applied_colortemp_step is None:
+            self._applied_colortemp_step = self._resolve_colortemp_step_locked()
+        return self._applied_colortemp_step
 
     def _ensure_worker_started_locked(self) -> None:
         """Start the single daemon Ramp worker thread the first time a Ramp
@@ -456,7 +522,7 @@ class MoonHaloModel:
                 if plan is None or plan.next_index >= len(plan.steps):
                     self._condition.wait()
                     continue
-                due_at, brightness_step = plan.steps[plan.next_index]
+                due_at, colortemp_step, brightness_step = plan.steps[plan.next_index]
                 remaining = due_at - time.monotonic()
                 if remaining > 0:
                     self._condition.wait(timeout=remaining)
@@ -464,7 +530,8 @@ class MoonHaloModel:
                 if self._ramp_plan is not plan:
                     continue  # cancelled or replaced while we were waiting
 
-                value = pack_d9(plan.colortemp_step, brightness_step)
+                # --- write-and-handle-error step (issue #34 adds retry here) ---
+                value = pack_d9(colortemp_step, brightness_step)
                 try:
                     self._port.write_vcp(VCP_D9, value)
                 except DdcError as error:
@@ -475,58 +542,54 @@ class MoonHaloModel:
                         error,
                     )
                 else:
+                    self._applied_colortemp_step = colortemp_step
                     self._applied_brightness_step = brightness_step
                     plan.performed.append((VCP_D9, value))
+                # --- end write-and-handle-error step ---
 
                 plan.next_index += 1
                 if plan.next_index >= len(plan.steps):
                     elapsed = time.monotonic() - plan.start_time
                     self._logger.info(
-                        "ramp complete target=%d writes=%s elapsed=%.2fs",
+                        "ramp complete target=%d colour=%d writes=%s elapsed=%.2fs",
                         plan.target_brightness_step,
+                        plan.target_colortemp_step,
                         plan.performed,
                         elapsed,
                     )
                     if self._ramp_plan is plan:
                         self._ramp_plan = None
 
-    def set_colortemp(self, step: int, stage: bool = False) -> dict[str, Any]:
-        """Set MoonHalo colour temperature to hardware step `step` (1-7).
+    def set_colortemp(
+        self, step: int, stage: bool = False, transition: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Set MoonHalo colour temperature to hardware step `step` (1-7)
+        over `transition` seconds (default `config.transition_seconds`).
 
         If `stage` is true, only the remembered `colortemp_step` changes:
-        no DDC writes happen, the halo's power is untouched, and a running
-        Ramp (brightness only, unaffected by colour) is left alone.
-        Otherwise, powers on first if not already on, then writes D9 with
-        `step` and the brightness step to keep (see
-        `_resolve_brightness_step_locked`), remembering both steps. If
-        `last_level` was not yet known, it is derived from the brightness
-        step kept. A snap command: cancels any running Ramp first.
+        no DDC writes happen, the halo's power is untouched, `transition`
+        is ignored, and a running Ramp is left alone entirely; the reply's
+        Transition reports zero steps since nothing was written. Otherwise
+        this goes through the shared planner (see `_plan_move_locked`),
+        aimed at `step` and the brightness step to keep (see
+        `_resolve_brightness_step_locked`) -- so a Ramp already in flight
+        is retargeted into a combined move rather than restarted, an
+        identical Target leaves it alone, and an explicit `transition` of
+        0 snaps. If `last_level` was not yet known, it is derived from the
+        brightness step kept.
         """
         with self._lock:
             if stage:
                 self._state.colortemp_step = step
                 self.last_writes = []
+                self.last_transition = Transition(seconds=0.0, steps=0)
                 self._save_state()
                 return self._status_locked()
 
-            self._cancel_ramp_locked()
-            writes: list[tuple[int, int]] = []
-            self._ensure_power_on_locked(writes)
-
-            brightness_step = self._resolve_brightness_step_locked()
-            d9_value = pack_d9(step, brightness_step)
-            self._port.write_vcp(VCP_D9, d9_value)
-            writes.append((VCP_D9, d9_value))
-
-            self._state.colortemp_step = step
-            self._state.brightness_step = brightness_step
-            if self._state.last_level is None:
-                self._state.last_level = brightness_step_to_level(brightness_step)
-            self._applied_brightness_step = brightness_step
-            self.last_transition = Transition(seconds=0.0, steps=1)
-            self.last_writes = writes
-            self._save_state()
-            return self._status_locked()
+            resolved_transition = (
+                self._config.transition_seconds if transition is None else transition
+            )
+            return self._plan_move_locked(step, None, resolved_transition)
 
     def _ensure_power_on_locked(self, writes: list[tuple[int, int]]) -> None:
         """Write D7 On and remember power "on" if not already on, appending
