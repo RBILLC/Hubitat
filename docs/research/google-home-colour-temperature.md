@@ -65,3 +65,21 @@ A SYNC response of type `LIGHT` with `OnOff`, `Brightness` and `ColorSetting` re
 - https://developers.home.google.com/cloud-to-cloud/traits/colorsetting
 - https://raw.githubusercontent.com/mbudnek/google-home-hubitat-community/master/README.md
 - Forum search.json queries on 2026-09-07 for colour-temperature-in-Google-Home reports: no thread found that reports a white slider appearing, or not appearing, for a CT-only Hubitat device through the built-in app.
+
+## Decisive test results, 2026-09-07 evening [OBSERVED]
+
+1. Google-side refresh: MoonHalo removed from Google Home, re-added through Hubitat's Google Home app, "Hey Google, sync my devices". No colour-temperature control. Explanation 3 is ruled out.
+2. Control device: "Hue filament bulb" (Apt Bedroom, `hueBridgeBulbCT`, state populated: colorTemperature 2890, colorName Soft White, networkStatus connected) shared through the built-in app. Accepted, but the Google Home tile has no colour-temperature control and renders exactly like MoonHalo. The same bulb linked through Hue's own Google Home integration shows the temperature-only picker (tap the colour control and only the white-temperature UI appears).
+3. Second control device: a Hue colour bulb (`hueBridgeBulbRGBW`) shared through the built-in app shows no colour control of any kind in Google Home (user report; acceptance line in the hub log and populated hue/saturation not yet confirmed). If confirmed, the Govee report in t/147034 (colour adjustable in the app, 2024-12) no longer holds, and the current Google Home app renders nothing from the built-in app's legacy colour traits.
+
+Conclusion: Hubitat's built-in Google Home app exposes no colour-temperature control for any device, including Hubitat's own CT driver. The `networkStatus`-vs-`connectionState` test is moot. User decision 2026-09-07: the community integration is rejected; the integration must work natively through the built-in app.
+
+## Hubitat's own CT bulb driver compared [DOC: source read]
+
+`hubitat/HubitatPublic/examples/drivers/advancedZigbeeCTbulb.groovy` (Mike Maxwell, 660 lines, read 2026-09-07): capabilities `Actuator`, `Switch`, `SwitchLevel`, `ChangeLevel`, `Bulb`, `Configuration`, `Color Temperature`; extra commands `flash`, `presetLevel`, `updateFirmware`; events `switch`, `level`, `colorTemperature`, `colorName` plus preference echoes. No `colorMode`, no `hue`, no `saturation`, no range attribute. That is the same Google-visible attribute set as `hueBridgeBulbCT` and as MoonHalo 0.0.7 (which adds only `connectionState`, shown harmless on 2026-09-04). Nothing in Hubitat's own CT driver reaches Google that MoonHalo does not already send. **[INFERENCE]** No driver change can produce the slider: the trait and range in the SYNC response are chosen by Hubitat's cloud, and Hubitat's own driver gets the same result.
+
+## Native routes remaining
+
+1. Voice through the legacy trait: "Hey Google, set MoonHalo to 4000 kelvin" / "make MoonHalo warmer"; check the hub log for `setColorTemperature`. Untested.
+2. RGBW facade: only viable if an RGBW device shows a white-temperature section in the Google Home app through the built-in app. Test 3 above says it does not; pending confirmation of acceptance.
+3. Hubitat updating the built-in app to Google's `ColorSetting` trait with `colorTemperatureRange` (the shape Hue's own integration sends). The only route to the Hue picker natively. Forum feature request to draft, citing t/147034 post 6 and tests 2 and 3.
