@@ -83,3 +83,10 @@ Conclusion: Hubitat's built-in Google Home app exposes no colour-temperature con
 1. Voice through the legacy trait: "Hey Google, set MoonHalo to 4000 kelvin" / "make MoonHalo warmer"; check the hub log for `setColorTemperature`. Untested.
 2. RGBW facade: only viable if an RGBW device shows a white-temperature section in the Google Home app through the built-in app. Test 3 above says it does not; pending confirmation of acceptance.
 3. Hubitat updating the built-in app to Google's `ColorSetting` trait with `colorTemperatureRange` (the shape Hue's own integration sends). The only route to the Hue picker natively. Forum feature request to draft, citing t/147034 post 6 and tests 2 and 3.
+
+## Final control results, 2026-09-07 late [OBSERVED]
+
+- Hue colour bulb (`hueBridgeBulbRGBW`) through the built-in app: no colour control of any kind in Google Home.
+- A bulb paired directly to the hub on Hubitat's own **Advanced Zigbee CT Bulb** driver, through the built-in app: no colour-temperature control.
+
+Every Hubitat driver tested (MoonHalo, hueBridgeBulbCT, hueBridgeBulbRGBW, Advanced Zigbee CT Bulb) gets on/off and brightness only. The outcome is independent of the driver and is decided by the SYNC payload Hubitat's cloud sends. Routes 1 and 2 above are closed; route 3 (Hubitat moving the built-in app to `ColorSetting`) is the only native fix. Draft forum post: `docs/forum/google-home-colorsetting-request.md`. The voice test of the legacy trait remains useful as a statement of what works today.
