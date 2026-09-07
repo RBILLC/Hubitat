@@ -130,8 +130,8 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
-| `GET /moonhalo/on` | `level` (query, optional, 1-100) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. |
-| `GET /moonhalo/off` | none | Turns the halo off. Leaves the remembered level and colour step untouched. |
+| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. With `transition` `0` (or if the halo is already on), it snaps: D7 on, then one D9 write, as before. Otherwise, if the halo was off, it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level over `transition` seconds. |
+| `GET /moonhalo/off` | `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo off. Leaves the remembered level and colour step untouched. With `transition` `0` (or if the halo is already off and dark), it snaps: D7 off alone, as before. Otherwise it dims out -- brightness ramps from the Applied step down to step 1 -- then writes D7 off. |
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60, default `transition_seconds`) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` over `transition` seconds -- immediately if `transition` is `0` or the move is at most one hardware step. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes, no DDC write happens, and `transition` is ignored. Otherwise moves to `<value>` over `transition` seconds -- immediately if `transition` is `0`. |
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
@@ -154,10 +154,11 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 }
 ```
 
-A brightness or colortemp reply always carries a `transition` object reporting the Transition actually applied:
-`seconds` is the transition used (the query value, or `transition_seconds` when the query was absent), and `steps`
-is how many D9 writes it takes to get there -- `1` for an immediate change, `0` for a staged colortemp call (`stage=1`
-while off), which writes nothing at all. The reply returns as soon as the change is accepted; when `steps` is more
+An on, off, brightness or colortemp reply always carries a `transition` object reporting the Transition actually
+applied: `seconds` is the transition used (the query value, or `transition_seconds` when the query was absent), and
+`steps` is how many D9 writes it takes to get there -- `1` for an immediate change, `0` for a staged colortemp call
+(`stage=1` while off), which writes nothing at all. Off can also report `0`: dimming out from brightness step 1 needs
+no D9 writes at all, only the final D7 off. The reply returns as soon as the change is accepted; when `steps` is more
 than 1, the writes themselves continue in the background for up to `seconds` more. For example,
 `GET /moonhalo/brightness/100?transition=1.2` starts a longer Ramp and replies immediately:
 
@@ -175,6 +176,11 @@ still running retargets it from wherever it has reached, moving both the brightn
 as a single combined move to brightness step 10 and colour step 7, not two separate ones. A command whose target
 already matches a Ramp already heading there on both axes leaves it running untouched; an explicit `transition=0`
 always cancels any running Ramp and snaps to the target at once.
+
+Turning off and on again also retargets rather than restarts. An off arriving while brightness is still rising turns
+the Ramp around into a dim-out that ends in D7 off; an on, brightness, or colour command arriving while the halo is
+still dimming out turns it back around and rises to the new target -- D7 off is never written, since the halo was lit
+the whole time, and the relight sequence above does not repeat (that would flash).
 
 ## Letting the Hub find the Bridge
 
@@ -414,7 +420,7 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
-| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long `transition` is, and a shorter `transition` drops even more of them evenly (0.4s fits about six at the monitor's ~60ms write pace). This is a hardware limit, not a bug in the Bridge. |
+| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long `transition` is, and a shorter `transition` drops even more of them evenly (0.4s fits about six at the monitor's ~60ms write pace). This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on` with a `transition`). This is a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
 
 ## Tests
