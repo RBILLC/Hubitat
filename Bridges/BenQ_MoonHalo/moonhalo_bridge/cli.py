@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
+from .capabilities import VcpEntry, parse_vcp_codes
 from .ddc import DdcError, DdcPort, FakeDdcPort, MonitorInfo, WindowsDdcPort
 
 #: Hardware facts verified on the RD280UG on 2026-09-03, used to pre-load the
@@ -18,10 +19,32 @@ DRY_RUN_MONITORS = [
 ]
 DRY_RUN_REGISTERS = {0xD9: (0x0105, 0x070A), 0xD7: (0x0230, 0x0231)}
 
+#: The RD280UG's own DDC/CI capabilities string, read verbatim on
+#: 2026-09-03 (issue #28) and recorded in
+#: docs/research/rd280ug-capabilities.md. Pre-loads the --dry-run fake so
+#: `capabilities` has a real string to parse with no hardware attached.
+DRY_RUN_CAPABILITIES = (
+    "(prot(monitor)type(LCD)model(RD280UG)cmds(01 02 03 07 0C E3 F3)vcp(02 04 08 10 12 13 "
+    "(00 01) 14 (04 05 08 0B) 16 18 19 1A 52 60 (0F 11 13) 62 68 (00 02 04 06 08 0A 0C 0E) "
+    "69 (00 01) 6A (00 01) 6F (00 01) 71 (00 01) 72 (50 64 78 8C A0) 7D (00 01 02 07 08) "
+    "7E(0F 11 13) 7F (01) 80 (00 01 02) 80 (00 01 02 03) 81 (00 01 02) 86 (02 05) 87 8A "
+    "8D (01 02) 94 (01 02 03) AA (01 02 03) C1 C2 C9 CA(01 02 05 06 09 0A 11 12 21 22) "
+    "CC(01 02 03 04 05 06 07 09 0A 0B 0D 0E 0F 10 12 14 17 1A 1E 1F 24 ) "
+    "D0(01 02 03 04 05 06 07 08 09 0A) D1(00 01 02) D2 D6 (50 60 90 A0) D7 D9 "
+    "DC (0A 0F 12 1F 23 30 31 32 3A) DF E1 E3 (00 01) E4 (02 03 04) E5 E6 (00 01) "
+    "E7 (00 01 0A 14 1E 3C 50 A0) E8 (01 02) E9 (01 02 03) EB (00 01 02 03) EE (00 01 02) "
+    "EF (00 01) F0 (00 01 02) F1 (00 1E 20 3C) F3 (00 01) F4 (00 01) F6 (00 01) "
+    "F8 (00 0A 14 1E) FD (00 03 04) mswhql(1)asset_eep(40)mccs_ver(2.2))"
+)
+
 
 def make_dry_run_port() -> FakeDdcPort:
     """A FakeDdcPort pre-loaded with the RD280UG's verified hardware facts."""
-    return FakeDdcPort(monitors=list(DRY_RUN_MONITORS), registers=dict(DRY_RUN_REGISTERS))
+    return FakeDdcPort(
+        monitors=list(DRY_RUN_MONITORS),
+        registers=dict(DRY_RUN_REGISTERS),
+        capabilities=DRY_RUN_CAPABILITIES,
+    )
 
 
 def parse_vcp_code(text: str) -> int:
@@ -58,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("monitors", help="list attached monitors")
 
+    sub.add_parser(
+        "capabilities", help="read and parse the monitor's DDC/CI capabilities string"
+    )
+
     read_parser = sub.add_parser("read", help="read a VCP register")
     read_parser.add_argument("code", type=parse_vcp_code, help="VCP code, hex (e.g. D9 or 0xD9)")
 
@@ -87,6 +114,13 @@ def _format_vcp(code: int, current: int, maximum: int) -> str:
     )
 
 
+def _format_vcp_entry(entry: VcpEntry) -> str:
+    if entry.values is None:
+        return f"  {entry.code:02X}"
+    values = " ".join(f"{value:02X}" for value in entry.values)
+    return f"  {entry.code:02X}  ({values})"
+
+
 def _run_monitors(port: DdcPort, out: TextIO) -> int:
     monitors = port.list_monitors()
     if not monitors:
@@ -113,6 +147,29 @@ def _run_write(port: DdcPort, code: int, value: int, dry_run: bool, out: TextIO)
         f"read-back: {_format_vcp(code, current, maximum)}",
         file=out,
     )
+    return 0
+
+
+def _run_capabilities(port: DdcPort, out: TextIO) -> int:
+    """Print the monitor's raw capabilities string, then its parsed VCP
+    list, one entry per line in the monitor's own order.
+
+    A DdcError from `read_capabilities` (retries exhausted) propagates to
+    `main`'s existing DdcError handler, same as `read`/`write`. A
+    ValueError from the parser is handled here instead, because the raw
+    string -- already printed by that point -- is what the user needs even
+    when parsing fails.
+    """
+    raw = port.read_capabilities()
+    print(raw, file=out)
+    try:
+        entries = parse_vcp_codes(raw)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    print(file=out)
+    for entry in entries:
+        print(_format_vcp_entry(entry), file=out)
     return 0
 
 
@@ -201,6 +258,8 @@ def main(argv: Optional[Sequence[str]] = None, out: Optional[TextIO] = None) -> 
             return _run_read(port, args.code, out)
         if args.command == "write":
             return _run_write(port, args.code, args.value, args.dry_run, out)
+        if args.command == "capabilities":
+            return _run_capabilities(port, out)
     except DdcError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

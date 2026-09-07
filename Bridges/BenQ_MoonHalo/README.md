@@ -237,6 +237,7 @@ Run these from the `Bridges/BenQ_MoonHalo` folder, with or without `--dry-run`:
 
 ```
 py -m moonhalo_bridge monitors
+py -m moonhalo_bridge capabilities
 py -m moonhalo_bridge read D9
 py -m moonhalo_bridge write D7 544
 ```
@@ -244,6 +245,16 @@ py -m moonhalo_bridge write D7 544
 `monitors` lists every attached physical monitor. `read <code>` reads a VCP register given as
 hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>` writes a
 value (decimal or `0x`-hex) to a VCP register and reads it back to confirm.
+
+`capabilities` reads the monitor's own DDC/CI capabilities string and prints it verbatim, then
+a blank line, then every VCP register it advertises, one per line in the monitor's own order,
+each formatted as a bare code (`  D9`) or a code with its advertised list of values
+(`  7E  (0F 11 13)`). Like `read`, it retries a transient failure up to three times, 50ms
+apart -- Microsoft documents both underlying calls as "usually returns quickly, but sometimes
+it can take several seconds to complete", and issue #28 saw exactly that on the RD280UG. The
+RD280UG's own capabilities string, the parsing grammar, and its full VCP register inventory are
+recorded in `docs/research/rd280ug-capabilities.md`; `--dry-run` pre-loads that exact string so
+`capabilities` has something real to parse with no hardware attached.
 
 **Caution: `write` changes the monitor immediately, with no confirmation prompt.** Only the
 values verified on the RD280UG on 2026-09-03 are known-good: `write D7 544` (0x0220, on at 360
