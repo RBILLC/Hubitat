@@ -133,7 +133,7 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 | `GET /moonhalo/on` | `level` (query, optional, 1-100) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. |
 | `GET /moonhalo/off` | none | Turns the halo off. Leaves the remembered level and colour step untouched. |
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60, default `transition_seconds`) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` over `transition` seconds -- immediately if `transition` is `0` or the move is at most one hardware step. |
-| `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes and no DDC write happens. |
+| `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes, no DDC write happens, and `transition` is ignored. Otherwise moves to `<value>` over `transition` seconds -- immediately if `transition` is `0`. |
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
 | `GET /health` | none | `{"ok": true, "version": "0.0.5"}`, no allowlist check, for a local liveness probe. |
 
@@ -154,10 +154,11 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 }
 ```
 
-A brightness reply always carries a `transition` object reporting the Transition actually applied: `seconds` is the
-transition used (the query value, or `transition_seconds` when the query was absent), and `steps` is how many D9
-writes it takes to get there -- `1` for an immediate change. The reply returns as soon as the change is accepted;
-when `steps` is more than 1, the writes themselves continue in the background for up to `seconds` more. For example,
+A brightness or colortemp reply always carries a `transition` object reporting the Transition actually applied:
+`seconds` is the transition used (the query value, or `transition_seconds` when the query was absent), and `steps`
+is how many D9 writes it takes to get there -- `1` for an immediate change, `0` for a staged colortemp call (`stage=1`
+while off), which writes nothing at all. The reply returns as soon as the change is accepted; when `steps` is more
+than 1, the writes themselves continue in the background for up to `seconds` more. For example,
 `GET /moonhalo/brightness/100?transition=1.2` starts a longer Ramp and replies immediately:
 
 ```
@@ -167,6 +168,13 @@ curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
 ```json
 {"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}}
 ```
+
+A brightness command and a colortemp command share one Ramp: a command that arrives while the other's Ramp is
+still running retargets it from wherever it has reached, moving both the brightness and colour bytes together, so
+`GET /moonhalo/brightness/100?transition=1.0` followed shortly by `GET /moonhalo/colortemp/7?transition=1.0` ends
+as a single combined move to brightness step 10 and colour step 7, not two separate ones. A command whose target
+already matches a Ramp already heading there on both axes leaves it running untouched; an explicit `transition=0`
+always cancels any running Ramp and snaps to the target at once.
 
 ## Letting the Hub find the Bridge
 

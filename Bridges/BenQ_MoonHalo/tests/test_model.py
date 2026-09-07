@@ -316,14 +316,18 @@ class TestMoonHaloModelSetColortemp(unittest.TestCase):
     def test_keeps_remembered_brightness_step(self):
         self.model.turn_on(50)  # establishes power "on" and brightness step 5
         self.port.writes.clear()
-        state = self.model.set_colortemp(7)
+        # transition=0: this test is about D9 packing/brightness
+        # preservation, not Ramps, so pin the write synchronous and
+        # deterministic.
+        state = self.model.set_colortemp(7, transition=0)
         expected_d9 = pack_d9(7, level_to_brightness_step(50))
         self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
         self.assertEqual(state["colorTempStep"], 7)
 
     def test_no_remembered_brightness_reads_d9_and_keeps_low_byte(self):
         self.port.registers[VCP_D9] = (0x0105, 0x070A)  # low byte 5
-        state = self.model.set_colortemp(7)
+        # transition=0: pin the write synchronous, as above.
+        state = self.model.set_colortemp(7, transition=0)
         expected_d9 = pack_d9(7, 5)
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
         self.assertEqual(state["brightnessStep"], 5)
@@ -338,7 +342,8 @@ class TestMoonHaloModelSetColortemp(unittest.TestCase):
     def test_colour_while_off_writes_power_on_then_d9_in_order(self):
         self.model.turn_off()
         self.port.writes.clear()
-        self.model.set_colortemp(7)
+        # transition=0: pin the write synchronous, as above.
+        self.model.set_colortemp(7, transition=0)
         self.assertEqual(len(self.port.writes), 2)
         self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
         self.assertEqual(self.port.writes[1][0], VCP_D9)
@@ -361,7 +366,9 @@ class TestMoonHaloModelSetColortemp(unittest.TestCase):
     def test_last_writes_recorded_for_colortemp(self):
         self.model.turn_on(50)
         self.port.writes.clear()
-        self.model.set_colortemp(2)
+        # transition=0: keep this synchronous so last_writes and port.writes
+        # are compared at a moment with no Ramp worker still writing.
+        self.model.set_colortemp(2, transition=0)
         self.assertEqual(self.model.last_writes, self.port.writes)
 
     def test_derives_last_level_from_brightness_when_unknown(self):

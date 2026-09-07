@@ -8,7 +8,7 @@ hook enforces the access-control allowlists (`allowed_macs`, `allowed_ips`,
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from flask import Flask, jsonify, request
 
@@ -38,19 +38,20 @@ def _log_request(logger: logging.Logger, endpoint: str, writes: list[tuple[int, 
     logger.info("endpoint=%s writes=%s outcome=%s", endpoint, writes, outcome)
 
 
-def _log_brightness_request(
-    logger: logging.Logger, endpoint: str, model: MoonHaloModel, level: int
+def _log_move_request(
+    logger: logging.Logger, endpoint: str, model: MoonHaloModel, target: Any
 ) -> None:
-    """The brightness endpoint's success log line: the immediate writes it
-    made (a Ramp's own writes are not among them) plus the Transition
-    applied, so a Ramp is traceable even though most of its writes happen
-    later on the worker thread."""
+    """The brightness and colortemp endpoints' success log line: the
+    immediate writes made (a Ramp's own writes are not among them) plus the
+    Transition applied, so a Ramp is traceable even though most of its
+    writes happen later on the worker thread. `target` is the Level
+    (brightness) or hardware colour step (colortemp) requested."""
     transition = model.last_transition
     logger.info(
         "endpoint=%s writes=%s target=%s transition=%ss steps=%s outcome=ok",
         endpoint,
         model.last_writes,
-        level,
+        target,
         transition.seconds,
         transition.steps,
     )
@@ -73,9 +74,10 @@ def _parse_level(raw: Optional[str]) -> Optional[int]:
 
 def _parse_transition(raw: Optional[str]) -> Optional[float]:
     """Validate the optional `transition` query on
-    `/moonhalo/brightness/<value>`: decimal seconds 0-60, or None when
-    absent (the caller then falls back to `config.transition_seconds`).
-    Raises ValueError, with a message fit for a 400 body, otherwise.
+    `/moonhalo/brightness/<value>` and `/moonhalo/colortemp/<value>`:
+    decimal seconds 0-60, or None when absent (the caller then falls back
+    to `config.transition_seconds`). Raises ValueError, with a message fit
+    for a 400 body, otherwise.
     """
     if raw is None:
         return None
@@ -211,7 +213,7 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_brightness_request(logger, endpoint, model, level)
+        _log_move_request(logger, endpoint, model, level)
         return (
             jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
             200,
@@ -226,15 +228,24 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
+        try:
+            transition = _parse_transition(request.args.get("transition"))
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
         stage = request.args.get("stage") == "1"
         try:
-            state = model.set_colortemp(step, stage=stage)
+            state = model.set_colortemp(step, stage=stage, transition=transition)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, model.last_writes, "ok")
-        return jsonify({"ok": True, "state": state}), 200
+        _log_move_request(logger, endpoint, model, step)
+        return (
+            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
+            200,
+        )
 
     @app.get("/moonhalo/status")
     def moonhalo_status():
