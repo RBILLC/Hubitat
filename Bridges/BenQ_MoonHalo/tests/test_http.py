@@ -82,7 +82,7 @@ class FailingWritesDdcPort(FakeDdcPort):
     `fail_writes` maps D9 value -> a count of scripted write failures still
     owed for that value; each write of that value consumes one failure
     before falling through to a real write, mirroring `FakeDdcPort.fail_reads`.
-    `reads` records every VCP code passed to `read_vcp`, in call order, so a
+    `reads` records every VCP register passed to `read_vcp`, in call order, so a
     test can assert a command read D9 before making its first write.
     """
 

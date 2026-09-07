@@ -13,7 +13,7 @@ actually written with, tracked as one hardware step per byte
 (`_applied_colortemp_step`, `_applied_brightness_step`). A brightness or
 colour change with a non-zero Transition schedules a **Ramp** -- a series
 of D9 writes spreading the move from the Applied state to the Target one
-across the Transition, both bytes interpolated together so a combined move
+across the Transition, both bytes moved together so a combined move
 (brightness and colour changing at once) is one sequence of writes -- run
 by one background worker thread owned by the model, so Target and Applied
 can differ while a Ramp is in flight. A newer command retargets the plan
@@ -298,9 +298,7 @@ class MoonHaloModel:
                     else self._config.default_on_level
                 )
             )
-            resolved_transition = (
-                self._config.transition_seconds if transition is None else transition
-            )
+            resolved_transition = self._resolve_transition(transition)
             return self._plan_move_locked(
                 None,
                 level_to_brightness_step(resolved_level),
@@ -336,9 +334,7 @@ class MoonHaloModel:
         arriving mid ramp-up retargets into a ramp-down ending in D7 off.
         """
         with self._lock:
-            resolved_transition = (
-                self._config.transition_seconds if transition is None else transition
-            )
+            resolved_transition = self._resolve_transition(transition)
             if not self._halo_lit_locked() or resolved_transition == 0:
                 self._cancel_ramp_locked()
                 return self._write_power_off_now_locked()
@@ -354,6 +350,11 @@ class MoonHaloModel:
             self._save_state()
             self._condition.notify_all()
             return self._status_locked()
+
+    def _resolve_transition(self, transition: Optional[float]) -> float:
+        """The Transition a command runs with: the one it carried, else
+        `config.transition_seconds`. An explicit 0 stays 0 (a snap)."""
+        return self._config.transition_seconds if transition is None else transition
 
     def _halo_lit_locked(self) -> bool:
         """Whether the monitor is actually emitting light right now, as
@@ -394,9 +395,7 @@ class MoonHaloModel:
         if level == 0:
             return self.turn_off(transition)
         with self._lock:
-            resolved_transition = (
-                self._config.transition_seconds if transition is None else transition
-            )
+            resolved_transition = self._resolve_transition(transition)
             return self._plan_move_locked(
                 None, level_to_brightness_step(level), resolved_transition, last_level=level
             )
@@ -484,7 +483,7 @@ class MoonHaloModel:
           once, synchronously.
         - Otherwise a Ramp is planned from the current Applied state to
           the new Target: the step count is the larger of the two axes'
-          deltas in hardware steps, both bytes interpolated linearly
+          deltas in hardware steps, both bytes spread evenly
           across it and rounded, dropping intermediate steps evenly so no
           write is scheduled closer than `WRITE_FLOOR_SECONDS` to the last
           -- so a Ramp already running is retargeted (continuing from
@@ -924,9 +923,7 @@ class MoonHaloModel:
                 self._save_state()
                 return self._status_locked()
 
-            resolved_transition = (
-                self._config.transition_seconds if transition is None else transition
-            )
+            resolved_transition = self._resolve_transition(transition)
             return self._plan_move_locked(step, None, resolved_transition)
 
     def _ensure_power_on_locked(self, writes: list[tuple[int, int]]) -> None:

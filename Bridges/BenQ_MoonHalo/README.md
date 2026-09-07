@@ -63,7 +63,7 @@ left out of `config.json` simply uses it.
 | `maker_api_token` | `null` | The Maker API access token. Lives only in `config.json`, which is gitignored; it never appears in the log. |
 | `announce_seconds` | `60` | Seconds between address announcements (at least 1). Keep it below the Driver's **Announcement timeout** (default 200), or the Hub will mark the Bridge offline between announcements. |
 | `announce_enabled` | `null` | `null` means announce whenever the four Maker values above are set; `true` or `false` forces it. |
-| `transition_seconds` | `0.6` | Default Transition, in seconds, for every brightness move; `0` makes every change immediate. The default is tuned to spread the MoonHalo's nine brightness steps evenly at the monitor's ~60ms write pace. |
+| `transition_seconds` | `0.6` | Default Transition, in seconds, for every brightness, colour and power move (there is no per-axis key); `0` makes every change immediate. The default is tuned to spread the MoonHalo's nine brightness steps evenly at the monitor's ~60ms write pace. |
 
 **Allowlist rules.** A caller is allowed if any of these hold, checked in order: it is loopback
 and `allow_loopback` is true; both `allowed_macs` and `allowed_ips` are empty (see the warning
@@ -130,7 +130,7 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
-| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. With `transition` `0` (or if the halo is already on), it snaps: D7 on, then one D9 write, as before. Otherwise, if the halo was off, it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level over `transition` seconds. |
+| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. If the halo is already on, this moves to the level exactly like `/moonhalo/brightness` (no D7 write; the same target as a running Ramp leaves it alone). From dark with `transition` `0` it snaps: D7 on, then one D9 write, as before. From dark otherwise it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level over `transition` seconds. |
 | `GET /moonhalo/off` | `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo off. Leaves the remembered level and colour step untouched. With `transition` `0` (or if the halo is already off and dark), it snaps: D7 off alone, as before. Otherwise it dims out -- brightness ramps from the Applied step down to step 1 -- then writes D7 off. |
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60, default `transition_seconds`) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` over `transition` seconds -- immediately if `transition` is `0` or the move is at most one hardware step. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage); `transition` (query, optional, seconds 0-60, default `transition_seconds`) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes, no DDC write happens, and `transition` is ignored. Otherwise moves to `<value>` over `transition` seconds -- immediately if `transition` is `0`. |
@@ -156,9 +156,9 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
 An on, off, brightness or colortemp reply always carries a `transition` object reporting the Transition actually
 applied: `seconds` is the transition used (the query value, or `transition_seconds` when the query was absent), and
-`steps` is how many D9 writes it takes to get there -- `1` for an immediate change, `0` for a staged colortemp call
-(`stage=1` while off), which writes nothing at all. Off can also report `0`: dimming out from brightness step 1 needs
-no D9 writes at all, only the final D7 off. The reply returns as soon as the change is accepted; when `steps` is more
+`steps` is how many D9 writes it takes to get there -- `1` for an immediate change, `0` when no D9 write is needed:
+a staged colortemp call (`stage=1` while off) writes nothing at all, and off writes D7 alone when it snaps
+(`transition=0`, or a halo already dark) or dims out from brightness step 1. The reply returns as soon as the change is accepted; when `steps` is more
 than 1, the writes themselves continue in the background for up to `seconds` more. For example,
 `GET /moonhalo/brightness/100?transition=1.2` starts a longer Ramp and replies immediately:
 

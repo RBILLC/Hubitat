@@ -161,6 +161,16 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             return jsonify({"ok": False, "error": "forbidden"}), 403
         return None
 
+    def transition_query(endpoint: str):
+        """The request's optional `transition` query, parsed, with a 400
+        response already logged and built when it is invalid: returns
+        `(seconds or None, None)` or `(None, response)`."""
+        try:
+            return _parse_transition(request.args.get("transition")), None
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return None, (jsonify({"ok": False, "error": str(error)}), 400)
+
     @app.get("/health")
     def health():
         _log_request(logger, "/health", NO_WRITES, "ok")
@@ -175,11 +185,9 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        try:
-            transition = _parse_transition(request.args.get("transition"))
-        except ValueError as error:
-            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 400
+        transition, rejection = transition_query(endpoint)
+        if rejection is not None:
+            return rejection
 
         try:
             state = model.turn_on(level, transition)
@@ -196,11 +204,9 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     @app.get("/moonhalo/off")
     def moonhalo_off():
         endpoint = "/moonhalo/off"
-        try:
-            transition = _parse_transition(request.args.get("transition"))
-        except ValueError as error:
-            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 400
+        transition, rejection = transition_query(endpoint)
+        if rejection is not None:
+            return rejection
 
         try:
             state = model.turn_off(transition)
@@ -223,11 +229,9 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        try:
-            transition = _parse_transition(request.args.get("transition"))
-        except ValueError as error:
-            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 400
+        transition, rejection = transition_query(endpoint)
+        if rejection is not None:
+            return rejection
 
         try:
             state = model.set_level(level, transition)
@@ -250,11 +254,9 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        try:
-            transition = _parse_transition(request.args.get("transition"))
-        except ValueError as error:
-            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 400
+        transition, rejection = transition_query(endpoint)
+        if rejection is not None:
+            return rejection
 
         stage = request.args.get("stage") == "1"
         try:
