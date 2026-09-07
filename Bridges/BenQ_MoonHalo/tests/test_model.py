@@ -246,7 +246,9 @@ class TestMoonHaloModelSetLevel(unittest.TestCase):
 
         for level, expected_step in ((1, 1), (50, 5), (100, 10)):
             self.port.writes.clear()
-            state = self.model.set_level(level)
+            # transition=0: this test is about D9 packing/colour preservation,
+            # not Ramps, so pin every write synchronous and deterministic.
+            state = self.model.set_level(level, transition=0)
             expected_d9 = pack_d9(remembered_colour_step, expected_step)
             self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
             self.assertEqual(state["brightnessStep"], expected_step)
@@ -296,7 +298,9 @@ class TestMoonHaloModelSetLevel(unittest.TestCase):
     def test_last_writes_recorded_for_brightness(self):
         self.model.turn_on(50)
         self.port.writes.clear()
-        self.model.set_level(80)
+        # transition=0: keep this synchronous so last_writes and port.writes
+        # are compared at a moment with no Ramp worker still writing.
+        self.model.set_level(80, transition=0)
         self.assertEqual(self.model.last_writes, self.port.writes)
 
 
