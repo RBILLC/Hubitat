@@ -19,8 +19,10 @@
  *   bulb with no power; switch and level keep their last known values.
  * - Attribute events are emitted only after the Bridge confirms a request,
  *   from the state carried in its reply. Nothing is assumed optimistically.
- * - Transition times (setLevel duration, setColorTemperature transitionTime)
- *   are accepted and ignored; the MoonHalo has no fades.
+ * - The Transition (setLevel's rate, setColorTemperature's tt) is forwarded
+ *   to the Bridge as the transition query parameter, in seconds: 0 makes the
+ *   change immediate; a missing or non-numeric value is omitted so the
+ *   Bridge's configured default Transition applies.
  * - on() only asks the Bridge to turn on; the Bridge restores the level it
  *   remembers (or its configured default). The Driver keeps no copy of that
  *   level: Hubitat's Google Home app sends setLevel and then on() for one
@@ -39,10 +41,14 @@
  *   timeout. Changing the typed IP or port forgets the announced address
  *   until the next announcement; saving other preferences keeps it.
  *
- * Version: 0.0.8 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.9 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-08 0.0.9 - setLevel's rate and setColorTemperature's tt are forwarded to the Bridge as
+ *                    the transition query parameter (seconds; 0 snaps immediately) instead of being
+ *                    ignored; a non-numeric or missing value still leaves the Bridge default in
+ *                    place (issue #36)
  * 2026-09-07 0.0.8 - setBridgeAddress(ip, port) command and bridgeAddress attribute: the Bridge
  *                    announces its LAN address through the Maker API, the Driver prefers it over
  *                    the typed IP, and a missed announcement marks the Bridge offline (issue #23)
@@ -239,7 +245,9 @@ void off() {
     sendBridge("/moonhalo/off", [command: "off"])
 }
 
-// rate (transition duration) is accepted and ignored.
+// rate, the Transition in seconds, is forwarded verbatim as the transition
+// query parameter, including 0; a null or non-numeric rate is omitted and
+// the Bridge's configured default Transition applies.
 void setLevel(value, rate = null) {
     logDebug "setLevel(${value}, ${rate})"
     if (value == null) return
@@ -249,16 +257,19 @@ void setLevel(value, rate = null) {
         return
     }
     if (level == 0) {
-        off()
+        // Level 0 is off, but its rate still travels: the Bridge dims out over it (0 snaps).
+        sendBridge("/moonhalo/off" + transitionQuery(rate), [command: "off"])
         return
     }
-    sendBridge("/moonhalo/brightness/${level}", [command: "setLevel", level: level])
+    sendBridge("/moonhalo/brightness/${level}" + transitionQuery(rate), [command: "setLevel", level: level])
 }
 
-// tt (transition time) is accepted and ignored. When a level is given the
-// brightness request goes first and the colour temperature request is sent
-// from its reply, so the Bridge sees them in order and the MoonHalo is on
-// (and pre-staging does not apply) by the time the colour arrives.
+// tt, the Transition in seconds, is forwarded the same way as setLevel's
+// rate, on the colour request and, when a level is given, on the brightness
+// request that precedes it. When a level is given the brightness request
+// goes first and the colour temperature request is sent from its reply, so
+// the Bridge sees them in order and the MoonHalo is on (and pre-staging does
+// not apply) by the time the colour arrives.
 void setColorTemperature(value, level = null, tt = null) {
     logDebug "setColorTemperature(${value}, ${level}, ${tt})"
     if (value == null) return
@@ -277,10 +288,11 @@ void setColorTemperature(value, level = null, tt = null) {
     String ctPath = "/moonhalo/colortemp/${kelvin}"
     Integer lvl = (level == null) ? null : limitIntegerRange(level, 0, 100)
     if (lvl != null && lvl > 0) {
-        sendBridge("/moonhalo/brightness/${lvl}", [command: "setColorTemperature", level: lvl, followUp: ctPath])
+        sendBridge("/moonhalo/brightness/${lvl}" + transitionQuery(tt), [command: "setColorTemperature", level: lvl, followUp: ctPath + transitionQuery(tt)])
         return
     }
-    sendBridge(ctPath + stageQuery(), [command: "setColorTemperature", colorTemperature: kelvin])
+    String stage = stageQuery()
+    sendBridge(ctPath + stage + transitionQuery(tt, stage != ""), [command: "setColorTemperature", colorTemperature: kelvin])
 }
 
 void setColorTempStep(step) {
@@ -365,6 +377,22 @@ private Boolean isIpv4(String text) {
 private String stageQuery() {
     Boolean stage = (colorStaging == true) && (device.currentValue("switch") != "on")
     return stage ? "?stage=1" : ""
+}
+
+// "?transition=<value>" (or "&transition=<value>" when queryStarted is true,
+// for a path that already carries a "?stage=1"), forwarding value verbatim
+// so 0, 3 and 2.5 all pass through unchanged. Empty when value is null or
+// not a decimal number (a Hubitat command argument may arrive as a String,
+// Integer, BigDecimal or null), in which case the Bridge's configured
+// default Transition applies.
+private String transitionQuery(Object value, Boolean queryStarted = false) {
+    if (value == null) return ""
+    String text = "${value}".toString().trim()
+    if (!text.isNumber()) {
+        logDebug "transition '${value}' is not a number; omitted, the Bridge default Transition applies"
+        return ""
+    }
+    return (queryStarted ? "&" : "?") + "transition=${text}"
 }
 
 // ---------------------------------------------------------------------------
