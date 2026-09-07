@@ -50,6 +50,10 @@ A SYNC response of type `LIGHT` with `OnOff`, `Brightness` and `ColorSetting` re
 - **Driver compatibility**: MoonHalo already has `setColorTemperature(value, level, tt)` with Kelvin first, `colorTemperature` attribute, `on`/`off`, `setLevel`. Nothing to add. Set the range to the Driver's 2700–6500 preferences.
 - **Setup cost** (README): the user creates their own Google smart-home Action (README says console.actions.google.com; Google has since moved smart-home projects to the Google Home Developer Console, so the exact clicks need checking), OAuth account linking, fulfilment URL from the Hub UID, then pastes the app into Apps Code. Human-only steps; a `/wizard` candidate.
 
+## Also checked: kkossev's Tuya Advanced Zigbee RGBW Bulb driver
+
+`kkossev/Hubitat` development branch, 1856 lines, read 2026-09-07 at the user's suggestion. It contains no Google Home, Alexa or HomeKit handling. Its one relevant pattern is `installed()`, which pre-populates the full RGBW attribute set with placeholders before the bulb has reported anything: `colorMode CT`, `colorTemperature 2700`, `hue 0`, `level 0`, `saturation 0`, `switch off`, `healthStatus unknown`. That is the "populate the states so Google accepts the device" fix from t/149874 written into the driver, and it is for a device that genuinely has RGB. For MoonHalo it adds nothing: acceptance is already solved, and the attribute set it would produce (hue, saturation, colorMode) is the RGBW set, which the built-in app would type as a colour bulb. **[INFERENCE]** Presenting MoonHalo as RGBW to obtain a colour wheel that internally maps to colour temperature is possible (the Govee case shows the built-in app renders colour for RGBW devices) but contradicts the spec's "only standard capabilities, exactly on/off, brightness and colour temperature" and would show controls the hardware cannot honour; not recommended.
+
 ## Sources read
 
 - https://community.hubitat.com/t/147034 (JSON; Mike Maxwell post 6, 2024-12-16)
