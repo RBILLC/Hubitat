@@ -21,17 +21,23 @@
  *   from the state carried in its reply. Nothing is assumed optimistically.
  * - Transition times (setLevel duration, setColorTemperature transitionTime)
  *   are accepted and ignored; the MoonHalo has no fades.
- * - on() restores the last level the Bridge reported; with none remembered
- *   it asks the Bridge for its default.
+ * - on() only asks the Bridge to turn on; the Bridge restores the level it
+ *   remembers (or its configured default). The Driver keeps no copy of that
+ *   level: Hubitat's Google Home app sends setLevel and then on() for one
+ *   slider move, and a Driver-side copy replayed the old level over the new.
  * - setColorTemperature while off turns the MoonHalo on, unless colour
  *   pre-staging is enabled, in which case the colour is stored for later.
  * - No hardware knowledge lives here: no VCP registers, no step maths. The
  *   only hardware-shaped value is the 1-7 step passed through by
  *   setColorTempStep.
  *
- * Version: 0.0.6 (pre-release; 1.0.0 on public announcement). The Bridge carries the same number.
+ * Version: 0.0.7 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-07 0.0.7 - on() sends /moonhalo/on and lets the Bridge restore its remembered level;
+ *                    the Driver's own lastLevel copy is gone. Google Home sends setLevel then
+ *                    on() for one slider move, and on() replayed the stale level (issue #21)
  * 2026-09-04 0.0.6 - connectionState is an attribute again (accepted by Google Home in 0.0.2);
  *                    no ColorMode: Hubitat's built-in Google Home app rejects colorMode without
  *                    full colour and gives a CT-only driver no temperature trait (issue #21)
@@ -102,6 +108,7 @@ void updated() {
     log.warn "debug logging is: ${logEnable == true}"
     log.warn "description logging is: ${txtEnable == true}"
     purgeStaleAttributes()
+    state.remove("lastLevel")
     unschedule()
     schedulePoll()
     if (logEnable) runIn(1800, "logsOff")
@@ -166,14 +173,13 @@ private void schedulePoll() {
 // Commands
 // ---------------------------------------------------------------------------
 
+// No level is sent: the Bridge remembers the last level itself (persisted
+// across restarts) and applies it, or its configured default. Sending a
+// Driver-side copy raced Google Home's setLevel, which arrives just before
+// on() for a single slider move, and replayed the old level over the new.
 void on() {
     logDebug "on()"
-    Integer lastLevel = asInteger(state.lastLevel)
-    if (lastLevel != null && lastLevel >= 1 && lastLevel <= 100) {
-        sendBridge("/moonhalo/brightness/${lastLevel}", [command: "on", level: lastLevel])
-    } else {
-        sendBridge("/moonhalo/on", [command: "on"])
-    }
+    sendBridge("/moonhalo/on", [command: "on"])
 }
 
 void off() {
@@ -392,7 +398,6 @@ private void applyState(Map halo, Map data) {
         Integer current = asInteger(device.currentValue("level"))
         Boolean changed = current != level
         emitEvent("level", level, "%", "${name} level ${changed ? 'was set to' : 'is'} ${level}%", changed)
-        if (level > 0) state.lastLevel = level
     }
 
     Integer kelvin = asInteger(halo.colorTemperature)
