@@ -90,3 +90,7 @@ Conclusion: Hubitat's built-in Google Home app exposes no colour-temperature con
 - A bulb paired directly to the hub on Hubitat's own **Advanced Zigbee CT Bulb** driver, through the built-in app: no colour-temperature control.
 
 Every Hubitat driver tested (MoonHalo, hueBridgeBulbCT, hueBridgeBulbRGBW, Advanced Zigbee CT Bulb) gets on/off and brightness only. The outcome is independent of the driver and is decided by the SYNC payload Hubitat's cloud sends. Routes 1 and 2 above are closed; route 3 (Hubitat moving the built-in app to `ColorSetting`) is the only native fix. Draft forum post: `docs/forum/google-home-colorsetting-request.md`. The voice test of the legacy trait remains useful as a statement of what works today.
+
+## Outcome, 2026-09-07 night [OBSERVED]
+
+The user already had the community Google Home integration installed for other devices. A device type "Light CT Bulb" (Bulb, Google type Light, traits On/Off, Brightness, Color Setting with Color Temperature Control only, 2700-6500, defaults for attribute and command) with the MoonHalo assigned gives full control in the Google Home app, including colour temperature. No driver change was needed. Setup reference: `google-home-community-integration-setup.md`; installer note added to the root README.
