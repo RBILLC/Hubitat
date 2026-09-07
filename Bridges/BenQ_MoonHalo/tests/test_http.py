@@ -139,7 +139,10 @@ class TestHealth(HttpTestCase):
 
 class TestMoonHaloOn(HttpTestCase):
     def test_on_default_level(self):
-        response = self.client.get("/moonhalo/on")
+        # transition=0: this test is about the D7-then-D9 snap order and
+        # level resolution, not the relight-and-Ramp sequence a non-zero
+        # Transition now takes (see TestPowerTransition).
+        response = self.client.get("/moonhalo/on?transition=0")
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertTrue(body["ok"])
@@ -151,21 +154,24 @@ class TestMoonHaloOn(HttpTestCase):
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_valid_level_1(self):
-        response = self.client.get("/moonhalo/on?level=1")
+        # transition=0: pin the snap order, as above.
+        response = self.client.get("/moonhalo/on?level=1&transition=0")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["state"]["level"], 1)
         expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(1))
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_valid_level_100(self):
-        response = self.client.get("/moonhalo/on?level=100")
+        # transition=0: pin the snap order, as above.
+        response = self.client.get("/moonhalo/on?level=100&transition=0")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["state"]["level"], 100)
         expected_d9 = pack_d9(self.config.default_colortemp_step, level_to_brightness_step(100))
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
 
     def test_on_with_level_70_uses_step_7(self):
-        response = self.client.get("/moonhalo/on?level=70")
+        # transition=0: pin the snap order, as above.
+        response = self.client.get("/moonhalo/on?level=70&transition=0")
         self.assertEqual(response.status_code, 200)
         expected_d9 = pack_d9(self.config.default_colortemp_step, 7)
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, expected_d9)])
@@ -191,9 +197,13 @@ class TestMoonHaloOn(HttpTestCase):
         self.assertEqual(self.port.writes, [])
 
     def test_on_after_off_restores_last_level(self):
-        self.client.get("/moonhalo/on?level=70")
-        self.client.get("/moonhalo/off")
-        response = self.client.get("/moonhalo/on")
+        # transition=0 throughout: this test is about the remembered Level
+        # surviving a round trip through off, not any Ramp: a background
+        # one left running past the test would be a stray write (and, on
+        # a shared logger, a stray log line) for a later test to trip over.
+        self.client.get("/moonhalo/on?level=70&transition=0")
+        self.client.get("/moonhalo/off?transition=0")
+        response = self.client.get("/moonhalo/on?transition=0")
         self.assertEqual(response.get_json()["state"]["level"], 70)
 
 
@@ -208,10 +218,214 @@ class TestMoonHaloOff(HttpTestCase):
         self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
 
 
+class TestPowerTransition(HttpTestCase):
+    """Issue #35: on and off over a Transition. Off dims the halo out --
+    ramping brightness from the Applied step down to step 1 -- before
+    writing D7 off; on (or a brightness/colour command while off) relights
+    at the target colour and brightness step 1, writes D7 on, then ramps
+    up. Retargeting across power never flashes and never writes D7 twice:
+    an off arriving mid ramp-up turns into a ramp-down ending in D7 off,
+    and an on/brightness/colour command arriving mid dim-out just turns
+    the Ramp back around, since the halo was lit the whole time.
+    """
+
+    def _start_at_level(self, level: int) -> None:
+        """Turn the halo on and drive it to `level`'s hardware brightness
+        step with transition=0, so the Ramp under test starts from a
+        known Applied step, then clear the setup write(s)."""
+        response = self.client.get(f"/moonhalo/brightness/{level}?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.port.writes.clear()
+
+    def test_off_with_transition_ramps_down_then_writes_d7_off(self):
+        self._start_at_level(100)  # step 10
+        colour_step = self.config.default_colortemp_step
+
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "off")
+        self.assertEqual(body["state"]["level"], 0)
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 9})
+
+        status = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(status["state"]["power"], "off")
+        self.assertEqual(status["state"]["level"], 0)
+
+        writes = _wait_for_writes(self.port, 10)
+        self.assertEqual(
+            writes,
+            [(VCP_D9, pack_d9(colour_step, step)) for step in range(9, 0, -1)]
+            + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+
+    def test_off_with_transition_zero_writes_d7_off_only(self):
+        self._start_at_level(100)
+        response = self.client.get("/moonhalo/off?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 0})
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+
+    def test_off_with_applied_step_one_plans_zero_d9_writes(self):
+        self._start_at_level(1)  # step 1
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.6, "steps": 0})
+        writes = _wait_for_writes(self.port, 1)
+        self.assertEqual(writes, [(VCP_POWER, POWER_OFF_VALUE)])
+
+    def test_on_with_transition_while_off_relights_then_ramps_up(self):
+        self.client.get("/moonhalo/brightness/100?transition=0")  # step 10
+        self.client.get("/moonhalo/colortemp/4?transition=0")
+        self.client.get("/moonhalo/off?transition=0")
+        self.port.writes.clear()
+
+        response = self.client.get("/moonhalo/on?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "on")
+        self.assertEqual(body["state"]["level"], 100)
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 9})
+        self.assertEqual(
+            self.port.writes[:2],
+            [(VCP_D9, pack_d9(4, 1)), (VCP_POWER, POWER_ON_VALUE)],
+        )
+
+        writes = _wait_for_writes(self.port, 11)
+        self.assertEqual(writes[2:], [(VCP_D9, pack_d9(4, step)) for step in range(2, 11)])
+
+    def test_on_with_transition_zero_while_off_keeps_the_snap(self):
+        # Existing behaviour (unchanged): with transition=0, on() still
+        # writes D7 then a single D9 -- see TestMoonHaloOn.
+        self.client.get("/moonhalo/off?transition=0")
+        self.port.writes.clear()
+        response = self.client.get("/moonhalo/on?level=50&transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
+        self.assertEqual(self.port.writes[1][0], VCP_D9)
+
+    def test_brightness_command_while_off_with_transition_follows_on_sequence(self):
+        self.client.get("/moonhalo/brightness/100?transition=0")
+        self.client.get("/moonhalo/colortemp/4?transition=0")
+        self.client.get("/moonhalo/off?transition=0")
+        self.port.writes.clear()
+
+        response = self.client.get("/moonhalo/brightness/100?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.port.writes[:2],
+            [(VCP_D9, pack_d9(4, 1)), (VCP_POWER, POWER_ON_VALUE)],
+        )
+        writes = _wait_for_writes(self.port, 11)
+        self.assertEqual(writes[2:], [(VCP_D9, pack_d9(4, step)) for step in range(2, 11)])
+
+    def test_colortemp_command_while_off_with_transition_follows_on_sequence(self):
+        self.client.get("/moonhalo/brightness/50?transition=0")  # step 5
+        self.client.get("/moonhalo/off?transition=0")
+        self.port.writes.clear()
+
+        response = self.client.get("/moonhalo/colortemp/7?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self.port.writes[:2],
+            [(VCP_D9, pack_d9(7, 1)), (VCP_POWER, POWER_ON_VALUE)],
+        )
+        # colour is already at the target in every write from here on --
+        # only the brightness half ramps, from step 1 up to the remembered
+        # step 5.
+        writes = _wait_for_writes(self.port, 6)
+        self.assertEqual(writes[2:], [(VCP_D9, pack_d9(7, step)) for step in range(2, 6)])
+
+    def test_brightness_zero_with_transition_dims_out_like_off(self):
+        self._start_at_level(1)  # step 1
+        response = self.client.get("/moonhalo/brightness/0?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "off")
+        self.assertEqual(body["state"]["level"], 0)
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 0})
+        writes = _wait_for_writes(self.port, 1)
+        self.assertEqual(writes, [(VCP_POWER, POWER_OFF_VALUE)])
+
+    def test_off_during_a_ramp_up_ends_with_d7_off(self):
+        self._start_at_level(1)  # step 1, on
+        self.client.get("/moonhalo/brightness/100?transition=1.0")  # ramping up
+        _wait_for_writes(self.port, 2)
+
+        response = self.client.get("/moonhalo/off?transition=0.3")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["state"]["power"], "off")
+        writes_at_off = list(self.port.writes)
+        last_d9_before = max(value & 0xFF for code, value in writes_at_off if code == VCP_D9)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and (
+            not self.port.writes or self.port.writes[-1] != (VCP_POWER, POWER_OFF_VALUE)
+        ):
+            time.sleep(0.01)
+        self.assertEqual(self.port.writes[-1], (VCP_POWER, POWER_OFF_VALUE))
+
+        # the down-Ramp never overshoots past where the up-Ramp had reached
+        new_d9_values = [
+            value & 0xFF for code, value in self.port.writes[len(writes_at_off):] if code == VCP_D9
+        ]
+        for value in new_d9_values:
+            self.assertLessEqual(value, last_d9_before)
+
+    def test_on_during_an_off_ramp_turns_around_without_writing_d7(self):
+        self._start_at_level(100)  # step 10, on
+        self.client.get("/moonhalo/off?transition=1.0")  # dimming out
+        _wait_for_writes(self.port, 2)
+        count_before_on = len(self.port.writes)
+
+        response = self.client.get("/moonhalo/on?transition=0.3")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "on")
+        self.assertEqual(body["state"]["level"], 100)
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and (
+            not self.port.writes or (self.port.writes[-1][1] & 0xFF) != 10
+        ):
+            time.sleep(0.01)
+
+        # the halo was lit the whole time (mid dim-out): D7 off is never
+        # written, and neither is a fresh D7 on.
+        new_writes = self.port.writes[count_before_on:]
+        self.assertNotIn((VCP_POWER, POWER_OFF_VALUE), new_writes)
+        self.assertNotIn((VCP_POWER, POWER_ON_VALUE), new_writes)
+        self.assertEqual(self.port.writes[-1][0], VCP_D9)
+        self.assertEqual(self.port.writes[-1][1] & 0xFF, 10)
+
+    def test_every_d7_write_is_on_or_off_value(self):
+        self._start_at_level(1)
+        self.client.get("/moonhalo/off?transition=0.3")
+        _wait_for_writes(self.port, 1)
+        self.client.get("/moonhalo/on?transition=0.3")
+        _wait_for_writes(self.port, 5)
+        for code, value in self.port.writes:
+            if code == VCP_POWER:
+                self.assertIn(value, (POWER_ON_VALUE, POWER_OFF_VALUE))
+
+    def test_invalid_transition_on_off_rejected(self):
+        for endpoint in ("/moonhalo/on", "/moonhalo/off"):
+            for value in ("abc", "-1", "61"):
+                with self.subTest(endpoint=endpoint, value=value):
+                    response = self.client.get(f"{endpoint}?transition={value}")
+                    self.assertEqual(response.status_code, 400)
+                    body = response.get_json()
+                    self.assertFalse(body["ok"])
+                    self.assertIn("transition", body["error"])
+                    self.assertEqual(self.port.writes, [])
+
+
 class TestMoonHaloBrightness(HttpTestCase):
     def test_brightness_1_50_100_write_expected_low_byte(self):
-        # establish a remembered colour step distinct from the default
-        self.client.get("/moonhalo/on?level=50")
+        # establish a remembered colour step distinct from the default;
+        # transition=0 so no background Ramp write can land between the
+        # clear()s below and the single-write assertions they guard.
+        self.client.get("/moonhalo/on?level=50&transition=0")
         self.port.writes.clear()
         colour_step = self.config.default_colortemp_step
 
@@ -228,9 +442,12 @@ class TestMoonHaloBrightness(HttpTestCase):
             self.assertEqual(self.port.writes, [(VCP_D9, expected_d9)])
 
     def test_brightness_0_behaves_as_off(self):
-        self.client.get("/moonhalo/on?level=50")
+        # transition=0 throughout: this test is about brightness 0
+        # behaving as a plain off, not the dim-out a non-zero Transition
+        # now gives it (see TestPowerTransition).
+        self.client.get("/moonhalo/on?level=50&transition=0")
         self.port.writes.clear()
-        response = self.client.get("/moonhalo/brightness/0")
+        response = self.client.get("/moonhalo/brightness/0?transition=0")
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertTrue(body["ok"])
@@ -241,7 +458,9 @@ class TestMoonHaloBrightness(HttpTestCase):
     def test_brightness_while_off_writes_power_on_then_d9_in_order(self):
         self.client.get("/moonhalo/off")
         self.port.writes.clear()
-        response = self.client.get("/moonhalo/brightness/50")
+        # transition=0: this test is about the D7-then-D9 snap order, not
+        # the relight-and-Ramp sequence a non-zero Transition now takes.
+        response = self.client.get("/moonhalo/brightness/50?transition=0")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.port.writes), 2)
         self.assertEqual(self.port.writes[0], (VCP_POWER, POWER_ON_VALUE))
@@ -249,7 +468,8 @@ class TestMoonHaloBrightness(HttpTestCase):
 
     def test_no_remembered_colour_step_reads_d9_and_preserves_high_byte(self):
         self.port.registers[VCP_D9] = (0x0305, 0x070A)  # high byte 3
-        response = self.client.get("/moonhalo/brightness/50")
+        # transition=0: pin the snap order, as above.
+        response = self.client.get("/moonhalo/brightness/50?transition=0")
         body = response.get_json()
         self.assertEqual(body["state"]["colorTempStep"], 3)
         expected_d9 = pack_d9(3, level_to_brightness_step(50))
@@ -719,9 +939,12 @@ class TestBrightnessTransitionLogging(HttpTestCase):
 class TestMoonHaloColortemp(HttpTestCase):
     def test_kelvin_2700_4600_6500_produce_steps_1_4_7(self):
         for kelvin, expected_step in ((2700, 1), (4600, 4), (6500, 7)):
-            self.client.get("/moonhalo/on?level=50")
+            # transition=0 on both calls: this test is about the Kelvin ->
+            # step mapping, not any Ramp -- one left running past the test
+            # would be a stray write for a later test to trip over.
+            self.client.get("/moonhalo/on?level=50&transition=0")
             self.port.writes.clear()
-            response = self.client.get(f"/moonhalo/colortemp/{kelvin}")
+            response = self.client.get(f"/moonhalo/colortemp/{kelvin}?transition=0")
             self.assertEqual(response.status_code, 200)
             body = response.get_json()
             self.assertTrue(body["ok"])
@@ -729,9 +952,10 @@ class TestMoonHaloColortemp(HttpTestCase):
 
     def test_bare_steps_1_to_7_pass_through(self):
         for step in range(1, 8):
-            self.client.get("/moonhalo/on?level=50")
+            # transition=0 on both calls, as above.
+            self.client.get("/moonhalo/on?level=50&transition=0")
             self.port.writes.clear()
-            response = self.client.get(f"/moonhalo/colortemp/{step}")
+            response = self.client.get(f"/moonhalo/colortemp/{step}?transition=0")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["state"]["colorTempStep"], step)
 
@@ -752,10 +976,13 @@ class TestMoonHaloColortemp(HttpTestCase):
         app.testing = True
         client = app.test_client()
 
-        response = client.get("/moonhalo/colortemp/2700")
+        # transition=0: this test is about the inverted Kelvin -> step
+        # mapping, not any Ramp -- one left running past the test would be
+        # a stray write for a later test to trip over.
+        response = client.get("/moonhalo/colortemp/2700?transition=0")
         self.assertEqual(response.get_json()["state"]["colorTempStep"], 7)
 
-        response = client.get("/moonhalo/colortemp/6500")
+        response = client.get("/moonhalo/colortemp/6500?transition=0")
         self.assertEqual(response.get_json()["state"]["colorTempStep"], 1)
 
     def test_invert_status_kelvin_consistent(self):
@@ -765,7 +992,8 @@ class TestMoonHaloColortemp(HttpTestCase):
         app.testing = True
         client = app.test_client()
 
-        client.get("/moonhalo/colortemp/2700")
+        # transition=0: as above.
+        client.get("/moonhalo/colortemp/2700?transition=0")
         status = client.get("/moonhalo/status").get_json()
         self.assertEqual(status["state"]["colorTempStep"], 7)
         self.assertEqual(
@@ -774,7 +1002,9 @@ class TestMoonHaloColortemp(HttpTestCase):
         )
 
     def test_d9_write_keeps_remembered_brightness_step(self):
-        self.client.get("/moonhalo/on?level=50")
+        # transition=0: no background Ramp write can then land between the
+        # clear() and the single-write assertion below.
+        self.client.get("/moonhalo/on?level=50&transition=0")
         self.port.writes.clear()
         # transition=0: this test is about D9 packing/brightness preservation,
         # not Ramps, so pin the write synchronous and deterministic.
@@ -794,8 +1024,10 @@ class TestMoonHaloColortemp(HttpTestCase):
 
     def test_failing_read_falls_back_to_default_brightness_step_with_warning(self):
         self.port.fail_reads[VCP_D9] = 3  # exhaust every retry
+        # transition=0: no Ramp needed for this test, and a background one
+        # left running past it would be a stray write for a later test.
         with self.assertLogs(level="WARNING") as logs:
-            response = self.client.get("/moonhalo/colortemp/7")
+            response = self.client.get("/moonhalo/colortemp/7?transition=0")
         body = response.get_json()
         self.assertEqual(body["state"]["brightnessStep"], self.config.default_brightness_step)
         self.assertTrue(any("brightness step" in message for message in logs.output))
@@ -821,14 +1053,18 @@ class TestMoonHaloColortemp(HttpTestCase):
         self.assertEqual(body["state"]["power"], "off")
         staged_step = body["state"]["colorTempStep"]
 
-        response = self.client.get("/moonhalo/on")
+        # transition=0: pin the D7-then-D9 snap order, as elsewhere -- this
+        # test is about the staged step being used, not the relight-and-
+        # Ramp sequence a non-zero Transition now takes.
+        response = self.client.get("/moonhalo/on?transition=0")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.port.writes), 2)
         expected_d9 = pack_d9(staged_step, level_to_brightness_step(self.config.default_on_level))
         self.assertEqual(self.port.writes[1], (VCP_D9, expected_d9))
 
     def test_status_after_restart_reports_same_step_and_kelvin(self):
-        self.client.get("/moonhalo/colortemp/6500")
+        # transition=0: no Ramp needed for this test.
+        self.client.get("/moonhalo/colortemp/6500?transition=0")
         expected = self.client.get("/moonhalo/status").get_json()["state"]
 
         second_model = MoonHaloModel(FakeDdcPort(), self.config)
@@ -920,7 +1156,9 @@ class TestMoonHaloStatus(HttpTestCase):
         self.assertEqual(self.port.writes, [])
 
     def test_status_reflects_prior_on(self):
-        self.client.get("/moonhalo/on?level=42")
+        # transition=0: no Ramp needed for this test, and a background one
+        # left running past it would be a stray write for a later test.
+        self.client.get("/moonhalo/on?level=42&transition=0")
         response = self.client.get("/moonhalo/status")
         body = response.get_json()
         self.assertEqual(body["state"]["power"], "on")
@@ -1001,7 +1239,10 @@ class TestBrightnessLogging(HttpTestCase):
             logger.removeHandler(handler)
 
     def test_log_line_contains_the_real_writes(self):
-        response = self.client.get("/moonhalo/brightness/50")
+        # transition=0: this test is about the log line naming the real
+        # applied D9 value, not the relight-and-Ramp sequence a non-zero
+        # Transition now takes (whose immediate D9 write is only step 1).
+        response = self.client.get("/moonhalo/brightness/50?transition=0")
         self.assertEqual(response.status_code, 200)
 
         log_text = self.config.log_file.read_text(encoding="utf-8")

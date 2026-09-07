@@ -25,6 +25,23 @@ A DDC/CI failure mid-Ramp does not fail the Hub's already-answered request
 the final write gets one retry, and if that also fails the Applied state
 becomes unknown (`_forget_applied_locked`) until the next Ramp reads D9 for
 itself.
+
+`turn_on` and `turn_off` (issue #35) share this Ramp machinery: a lit halo
+(power "on", or mid dim-out -- see below) turning off with a non-zero
+Transition gets a brightness-down Ramp to step 1 whose true final write is
+D7 off, not another D9 write (`_RampPlan.power_off_after`; see
+`_worker_loop` and `_perform_ramp_write_locked`'s `vcp_code` parameter). A
+dark halo turning on (or taking a brightness/colour command) with a
+non-zero Transition writes D9 at the target colour and brightness step 1,
+then D7 on -- issue #29 showed a D9 write while off is applied and relights
+the halo at the new value with no flash on the following D7 write -- and
+then Ramps brightness up from there. `_halo_lit_locked` is what tells the
+two ends of this apart from "off and dark": while a power_off_after Ramp
+is still running, Target power already reads "off" but the halo is still
+lit, so an on/brightness/colour command arriving mid dim-out must not
+repeat the relight sequence (that would flash) -- it just retargets the
+Ramp upward and D7 off is never written; the mirror case, an off arriving
+mid ramp-up, retargets down to a fresh D7 off instead of restarting.
 """
 from __future__ import annotations
 
@@ -101,6 +118,14 @@ class _RampPlan:
     are the Ramp's destination on each axis, for the completion/cancel log
     lines. `performed` records the writes actually made (a failed write is
     skipped, not recorded) for the completion log line.
+
+    `power_off_after` (issue #35) marks a `turn_off` Ramp: once every step
+    in `steps` is done (`next_index >= len(steps)`, possibly true from the
+    start, with an empty `steps` list), the worker's next action is one
+    D7 `POWER_OFF_VALUE` write -- the plan's true final write, not another
+    D9 one, so none of `steps` is ever treated as final (see
+    `_worker_loop`'s `is_final` and `_perform_ramp_write_locked`'s
+    `vcp_code` parameter).
     """
 
     target_colortemp_step: int
@@ -110,6 +135,7 @@ class _RampPlan:
     start_time: float
     next_index: int = 0
     performed: list[tuple[int, int]] = field(default_factory=list)
+    power_off_after: bool = False
 
 
 def colortemp_step_to_kelvin(
@@ -250,11 +276,18 @@ class MoonHaloModel:
             json.dump(self._state.to_dict(), handle)
         tmp_path.replace(self._state_file)
 
-    def turn_on(self, level: Optional[int] = None) -> dict[str, Any]:
+    def turn_on(self, level: Optional[int] = None, transition: Optional[float] = None) -> dict[str, Any]:
         """Resolve the level to apply -- `level` if given, else the
-        remembered last level, else the configured default -- and apply it
-        exactly as `set_level` would: D7 On (if not already on) followed by
-        a D9 write, so `/moonhalo/on` writes power then brightness."""
+        remembered last level, else the configured default -- and reach it
+        through the shared planner (`_plan_move_locked`), keeping the
+        current Target colour step, exactly as `set_level` does (issue
+        #35): when the halo is already on this behaves like a `set_level`
+        to that level (the same-target-Ramp rule included, which is what
+        keeps a Google Home setLevel-then-on pair from stuttering); when
+        it is dark, `transition` decides between today's D7-then-D9 snap
+        (0, the default `resolved_transition` when the caller wants an
+        immediate change) and the D9-then-D7 relight-and-Ramp sequence
+        (non-zero; see the module docstring)."""
         with self._lock:
             resolved_level = (
                 level
@@ -265,30 +298,101 @@ class MoonHaloModel:
                     else self._config.default_on_level
                 )
             )
-            return self._apply_level_locked(resolved_level)
+            resolved_transition = (
+                self._config.transition_seconds if transition is None else transition
+            )
+            return self._plan_move_locked(
+                None,
+                level_to_brightness_step(resolved_level),
+                resolved_transition,
+                last_level=resolved_level,
+            )
 
-    def turn_off(self) -> dict[str, Any]:
-        """Write D7 off (360 degree mode bit preserved) and remember power
-        "off". The remembered `last_level` and D9 steps are left untouched.
-        A snap command: cancels any running Ramp first."""
+    def turn_off(self, transition: Optional[float] = None) -> dict[str, Any]:
+        """Turn the MoonHalo off over `transition` seconds (default
+        `config.transition_seconds`); see CONTEXT.md's Transition/Ramp
+        glossary and issue #35.
+
+        Not lit right now (`_halo_lit_locked` false: Target power not
+        "on", and no dim-out Ramp with `power_off_after` still in flight)
+        -- including the very first call on a freshly loaded model, whose
+        Target power is "unknown": write D7 off alone, a harmless re-sync,
+        regardless of `transition`.
+
+        Lit, with `transition` resolving to 0: cancel any Ramp and snap
+        straight to D7 off, exactly as before #35.
+
+        Otherwise (lit, non-zero transition): Target power becomes "off"
+        at once -- `brightness_step`, `colortemp_step` and `last_level`
+        are left untouched, so `status` already reports level 0 and a
+        following `turn_on` restores the level -- and a Ramp is planned
+        from the Applied state down to brightness step 1, holding the
+        Applied colour step, with `power_off_after=True` so the worker's
+        true final write is D7 off (see `_RampPlan`/`_worker_loop`); this
+        is never collapsed to a synchronous write, even for a single D9
+        write or none at all (`_plan_power_off_ramp_locked`). A Ramp
+        already running -- up or down -- is replaced, continuing from
+        wherever the Applied state currently is: this is how an off
+        arriving mid ramp-up retargets into a ramp-down ending in D7 off.
+        """
         with self._lock:
+            resolved_transition = (
+                self._config.transition_seconds if transition is None else transition
+            )
+            if not self._halo_lit_locked() or resolved_transition == 0:
+                self._cancel_ramp_locked()
+                return self._write_power_off_now_locked()
+
             self._cancel_ramp_locked()
-            self._port.write_vcp(VCP_POWER, POWER_OFF_VALUE)
-            self.last_writes = [(VCP_POWER, POWER_OFF_VALUE)]
-            self.last_transition = Transition(seconds=0.0, steps=1)
+            applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
+            applied_brightness_step = self._resolve_applied_brightness_step_locked()
+            self._plan_power_off_ramp_locked(
+                applied_colortemp_step, applied_brightness_step, resolved_transition
+            )
             self._state.power = "off"
+            self.last_writes = []
             self._save_state()
+            self._condition.notify_all()
             return self._status_locked()
+
+    def _halo_lit_locked(self) -> bool:
+        """Whether the monitor is actually emitting light right now, as
+        opposed to "off and dark" (issue #35): Target power "on", or
+        Target power "off" while a dim-out Ramp (`power_off_after`) is
+        still in flight -- D7 off has not been written yet, so the halo is
+        still lit at whatever step that Ramp has reached. This is what
+        lets an on/brightness/colour command arriving mid dim-out retarget
+        upward without repeating the relight sequence (which would flash)
+        or ever writing D7 off, and what lets `turn_off` tell a genuinely
+        dark halo (skip the Ramp, just re-sync D7 off) apart from a lit
+        one. Caller holds `self._lock`."""
+        if self._state.power == "on":
+            return True
+        return self._ramp_plan is not None and self._ramp_plan.power_off_after
+
+    def _write_power_off_now_locked(self) -> dict[str, Any]:
+        """Write D7 off alone: the snap path for an already-dark halo (a
+        harmless re-sync) and for a lit halo with an explicit `transition`
+        of 0. No D9 write ever happens here, so the reply's Transition
+        always reports zero steps. Caller holds `self._lock`."""
+        self._port.write_vcp(VCP_POWER, POWER_OFF_VALUE)
+        self.last_writes = [(VCP_POWER, POWER_OFF_VALUE)]
+        self.last_transition = Transition(seconds=0.0, steps=0)
+        self._state.power = "off"
+        self._save_state()
+        return self._status_locked()
 
     def set_level(self, level: int, transition: Optional[float] = None) -> dict[str, Any]:
         """Set MoonHalo brightness to `level` (0-100) over `transition`
-        seconds (default `config.transition_seconds`). Level 0 delegates to
-        `turn_off` (a snap; `transition` is ignored). Otherwise powers on
-        first if not already on, then goes through the shared planner (see
-        `_plan_move_locked`), keeping the current Target colour step.
+        seconds (default `config.transition_seconds`). Level 0 delegates
+        to `turn_off` with the same `transition` (issue #35: a Transition
+        applies to dimming out too, not just to snapping off). Otherwise
+        goes through the shared planner (see `_plan_move_locked`), keeping
+        the current Target colour step, powering on first if not already
+        on.
         """
         if level == 0:
-            return self.turn_off()
+            return self.turn_off(transition)
         with self._lock:
             resolved_transition = (
                 self._config.transition_seconds if transition is None else transition
@@ -296,21 +400,6 @@ class MoonHaloModel:
             return self._plan_move_locked(
                 None, level_to_brightness_step(level), resolved_transition, last_level=level
             )
-
-    def _apply_level_locked(self, level: int) -> dict[str, Any]:
-        """Shared body of `turn_on` once a concrete level 1-100 is known:
-        an immediate, synchronous write -- `turn_on` is a snap command, not
-        a Ramp target, per this ticket. Caller holds `self._lock`."""
-        writes: list[tuple[int, int]] = []
-        self._ensure_power_on_locked(writes)
-        self._cancel_ramp_locked()
-        return self._write_move_now_locked(
-            self._resolve_colortemp_step_locked(),
-            level_to_brightness_step(level),
-            writes,
-            transition_seconds=0.0,
-            last_level=level,
-        )
 
     def _write_move_now_locked(
         self,
@@ -323,10 +412,11 @@ class MoonHaloModel:
         """Perform one synchronous D9 write to `(colortemp_step,
         brightness_step)`, used by `_plan_move_locked` when
         `transition_seconds` is 0, the move collapses to one write, or
-        there is no delta on either axis -- and by `_apply_level_locked`
-        (`turn_on` is always a snap). `writes` already holds any immediate
-        D7 write; `transition_seconds` is echoed back in `last_transition`
-        even though only one write happens. `last_level`, when given,
+        there is no delta on either axis. `writes` already holds any
+        immediate D7 write (or, per issue #35, the D9-then-D7 relight
+        pair a power-on-with-Transition sequence just made);
+        `transition_seconds` is echoed back in `last_transition` even
+        though only one write happens here. `last_level`, when given,
         replaces the remembered Level. Caller holds `self._lock`."""
         d9_value = pack_d9(colortemp_step, brightness_step)
         self._port.write_vcp(VCP_D9, d9_value)
@@ -353,23 +443,43 @@ class MoonHaloModel:
     ) -> dict[str, Any]:
         """Reach a new Target, given `transition_seconds`, either
         synchronously or by (re)planning a Ramp from the current Applied
-        state. Shared by `set_level` and `set_colortemp`. Caller holds
-        `self._lock`.
+        state. Shared by `turn_on`, `set_level` and `set_colortemp`.
+        Caller holds `self._lock`.
 
         Exactly one of `new_colortemp_step` / `new_brightness_step` is the
         axis being commanded; the other is `None`, meaning "keep the
         current Target", resolved here the same way a colour- or
         brightness-only write always has (`_resolve_colortemp_step_locked`
         / `_resolve_brightness_step_locked`). `last_level`, given by
-        `set_level`, replaces the remembered Level outright; left `None`
-        (by `set_colortemp`), the remembered Level is instead derived from
-        the brightness step kept, the first time it is not yet known.
+        `turn_on` and `set_level`, replaces the remembered Level outright;
+        left `None` (by `set_colortemp`), the remembered Level is instead
+        derived from the brightness step kept, the first time it is not
+        yet known.
 
         - A command whose Target already equals a Ramp already in flight
           on *both* axes leaves that Ramp completely untouched: no new
           writes, and the reply reports the running Ramp's own Transition.
           (A command that changes either axis retargets the plan instead,
           and an explicit `transition_seconds` of 0 always snaps.)
+        - Lit already (`_halo_lit_locked`, issue #35) -- genuinely on, or
+          mid dim-out with D7 off not yet written -- retargets straight to
+          "on" with no D7 write at all: repeating the relight sequence
+          below would flash, and a genuinely-on halo needs no D7 write
+          anyway.
+        - Dark, with `transition_seconds == 0`: today's D7-then-D9 snap,
+          unchanged since #29.
+        - Dark, with a non-zero `transition_seconds` (issue #35): D9 is
+          written at the target colour step and brightness step 1, then
+          D7 on -- issue #29 showed a D9 write while off is applied and
+          relights the halo at the new value with no flash on the
+          following D7 write -- and the Applied state becomes exactly
+          that (colour target, brightness 1), from which the Ramp below
+          runs up to the full target. When the target brightness step is
+          already 1 (turning on to the lowest level), that immediate D9
+          write already reached the target: this returns at once,
+          reporting the Transition as one step (the immediate write) with
+          no further Ramp -- a second, identical D9 write would be a
+          wasted DDC call.
         - `transition_seconds == 0`, or no delta on either axis, writes
           once, synchronously.
         - Otherwise a Ramp is planned from the current Applied state to
@@ -397,12 +507,19 @@ class MoonHaloModel:
 
         if (
             self._ramp_plan is not None
+            and not self._ramp_plan.power_off_after
             and target_colortemp_step == self._state.colortemp_step
             and target_brightness_step == self._state.brightness_step
             and transition_seconds != 0
         ):
             # An explicit 0 is a request to snap, so it falls through to
-            # cancel the Ramp and write the target at once.
+            # cancel the Ramp and write the target at once. A running
+            # power_off_after plan is excluded even on a coincidental
+            # match: turn_off deliberately leaves brightness_step and
+            # colortemp_step at their pre-dim-out Target (issue #35), so
+            # this equality says nothing about what that plan is actually
+            # heading towards -- the halo-lit branch below is what
+            # retargets a dim-out into a ramp-up correctly.
             plan = self._ramp_plan
             if last_level is not None and self._state.last_level != last_level:
                 # Same hardware steps, different Level (95 and 100 both
@@ -417,11 +534,45 @@ class MoonHaloModel:
             return self._status_locked()
 
         writes: list[tuple[int, int]] = []
-        self._ensure_power_on_locked(writes)
+        was_lit = self._halo_lit_locked()
         self._cancel_ramp_locked()
 
-        applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
-        applied_brightness_step = self._resolve_applied_brightness_step_locked()
+        if was_lit:
+            # Genuinely on already, or mid dim-out (a power_off_after Ramp
+            # that has not yet written D7 off): issue #35's "no flash"
+            # case. Retarget straight to "on" with no D7 write.
+            self._state.power = "on"
+            applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
+            applied_brightness_step = self._resolve_applied_brightness_step_locked()
+        elif transition_seconds == 0:
+            # Dark, snapping: today's D7-then-D9 order, unchanged since #29.
+            self._ensure_power_on_locked(writes)
+            applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
+            applied_brightness_step = self._resolve_applied_brightness_step_locked()
+        else:
+            # Dark, with a Transition (issue #35): relight at the target
+            # colour and brightness step 1 first, then Ramp up from there.
+            d9_value = pack_d9(target_colortemp_step, 1)
+            self._port.write_vcp(VCP_D9, d9_value)
+            writes.append((VCP_D9, d9_value))
+            self._port.write_vcp(VCP_POWER, POWER_ON_VALUE)
+            writes.append((VCP_POWER, POWER_ON_VALUE))
+            self._applied_colortemp_step = target_colortemp_step
+            self._applied_brightness_step = 1
+            self._state.power = "on"
+            applied_colortemp_step = target_colortemp_step
+            applied_brightness_step = 1
+            if applied_brightness_step == target_brightness_step:
+                # Turning on to the lowest level: the immediate D9 write
+                # above already is the target, so it -- not a further,
+                # identical write -- counts as the Transition's one step.
+                if last_level is not None:
+                    self._state.last_level = last_level
+                self.last_writes = writes
+                self.last_transition = Transition(seconds=float(transition_seconds), steps=1)
+                self._save_state()
+                return self._status_locked()
+
         colour_delta = target_colortemp_step - applied_colortemp_step
         brightness_delta = target_brightness_step - applied_brightness_step
         steps_delta = max(abs(colour_delta), abs(brightness_delta))
@@ -467,19 +618,73 @@ class MoonHaloModel:
         self._condition.notify_all()
         return self._status_locked()
 
+    def _plan_power_off_ramp_locked(
+        self,
+        applied_colortemp_step: int,
+        applied_brightness_step: int,
+        transition_seconds: float,
+    ) -> None:
+        """Plan the brightness-down Ramp a lit `turn_off` makes with a
+        non-zero `transition`: from `applied_brightness_step` down to
+        step 1, holding `applied_colortemp_step`, ending in a D7 off write
+        the worker performs as the plan's true final write
+        (`power_off_after=True`; see `_RampPlan`/`_worker_loop`). Uses the
+        same step-count rule as `_plan_move_locked` -- the brightness
+        delta, capped by `transition_seconds // WRITE_FLOOR_SECONDS` -- but,
+        unlike that planner, this is never collapsed to a synchronous
+        write: an Applied step of 1 plans zero D9 writes (the worker's
+        only action is the D7 off write, performed at once), and a delta
+        of one hardware step is a one-write plan followed by D7 off, not a
+        synchronous write. Caller holds `self._lock` and is responsible
+        for `self._state.power` and persisting it.
+        """
+        delta = applied_brightness_step - 1
+        step_count = 0
+        if delta > 0:
+            step_count = max(1, min(delta, int(transition_seconds // WRITE_FLOOR_SECONDS)))
+
+        now = time.monotonic()
+        if step_count == 0:
+            plan_steps: list[tuple[float, int, int]] = []
+        else:
+            denom = max(step_count - 1, 1)
+            plan_steps = [
+                (
+                    now + (k * transition_seconds / denom),
+                    applied_colortemp_step,
+                    applied_brightness_step - round(delta * (k + 1) / step_count),
+                )
+                for k in range(step_count)
+            ]
+
+        self._ramp_plan = _RampPlan(
+            target_colortemp_step=applied_colortemp_step,
+            target_brightness_step=1,
+            transition_seconds=transition_seconds,
+            steps=plan_steps,
+            start_time=now,
+            power_off_after=True,
+        )
+        self._ensure_worker_started_locked()
+        self.last_transition = Transition(seconds=float(transition_seconds), steps=step_count)
+
     def _cancel_ramp_locked(self) -> None:
         """Clear any in-flight Ramp plan, logging the writes it got to make.
+        `power_off=True` names a dim-out Ramp cancelled before it ever
+        wrote D7 off (issue #35) -- an on/brightness/colour command
+        arriving mid dim-out, or a second `turn_off` retargeting it.
         Caller holds `self._lock`; the worker thread notices on its next
         wake and finds nothing to do."""
         plan = self._ramp_plan
         if plan is not None:
             self._ramp_plan = None
             self._logger.info(
-                "ramp cancelled target=%d colour=%d writes=%s elapsed=%.2fs",
+                "ramp cancelled target=%d colour=%d writes=%s elapsed=%.2fs power_off=%s",
                 plan.target_brightness_step,
                 plan.target_colortemp_step,
                 plan.performed,
                 time.monotonic() - plan.start_time,
+                plan.power_off_after,
             )
             self._condition.notify_all()
 
@@ -546,11 +751,20 @@ class MoonHaloModel:
         handled by `_perform_ramp_write_locked` (see there for the
         intermediate-vs-final distinction); this loop only decides what
         happens next based on whether that write actually landed.
+
+        A `power_off_after` plan (issue #35) has no D9 write treated as
+        final -- its true final write is the D7 off `_perform_power_off_after_locked`
+        makes once every D9 step is done, possibly none at all.
         """
         while True:
             with self._condition:
                 plan = self._ramp_plan
-                if plan is None or plan.next_index >= len(plan.steps):
+                if plan is None:
+                    self._condition.wait()
+                    continue
+                if plan.next_index >= len(plan.steps):
+                    if plan.power_off_after:
+                        self._perform_power_off_after_locked(plan)
                     self._condition.wait()
                     continue
                 due_at, colortemp_step, brightness_step = plan.steps[plan.next_index]
@@ -561,14 +775,14 @@ class MoonHaloModel:
                 if self._ramp_plan is not plan:
                     continue  # cancelled or replaced while we were waiting
 
-                is_final = plan.next_index == len(plan.steps) - 1
+                is_final = plan.next_index == len(plan.steps) - 1 and not plan.power_off_after
                 value = pack_d9(colortemp_step, brightness_step)
                 if self._perform_ramp_write_locked(plan, value, is_final):
                     self._applied_colortemp_step = colortemp_step
                     self._applied_brightness_step = brightness_step
                     plan.performed.append((VCP_D9, value))
                     plan.next_index += 1
-                    if plan.next_index >= len(plan.steps):
+                    if plan.next_index >= len(plan.steps) and not plan.power_off_after:
                         elapsed = time.monotonic() - plan.start_time
                         self._logger.info(
                             "ramp complete target=%d colour=%d writes=%s elapsed=%.2fs",
@@ -587,26 +801,62 @@ class MoonHaloModel:
                         self._ramp_plan = None
                 else:
                     # An intermediate write failed and was skipped (already
-                    # logged); the Ramp carries on towards the target.
+                    # logged); the Ramp carries on towards the target (or,
+                    # for a power_off_after plan, towards the D7 off write).
                     plan.next_index += 1
 
-    def _perform_ramp_write_locked(self, plan: _RampPlan, value: int, is_final: bool) -> bool:
-        """Perform one Ramp D9 write, handling a `DdcError` per the ticket:
+    def _perform_power_off_after_locked(self, plan: _RampPlan) -> None:
+        """Perform the D7 off write a `power_off_after` Ramp ends in
+        (issue #35), once its D9 writes (zero or more) are done -- the
+        plan's true final write (see `_RampPlan`), so it gets the same
+        final-write retry as any other, by passing `vcp_code=VCP_POWER`
+        to `_perform_ramp_write_locked`. Whether it lands, or is
+        abandoned after the retry (already logged, and the Applied D9
+        state forgotten, by that method), the plan ends here either way:
+        this is only ever attempted once. Caller holds `self._lock` (via
+        `self._condition`)."""
+        if self._perform_ramp_write_locked(plan, POWER_OFF_VALUE, True, vcp_code=VCP_POWER):
+            plan.performed.append((VCP_POWER, POWER_OFF_VALUE))
+            elapsed = time.monotonic() - plan.start_time
+            self._logger.info(
+                "ramp complete target=%d colour=%d writes=%s elapsed=%.2fs power_off=True",
+                plan.target_brightness_step,
+                plan.target_colortemp_step,
+                plan.performed,
+                elapsed,
+            )
+        if self._ramp_plan is plan:
+            self._ramp_plan = None
+
+    def _perform_ramp_write_locked(
+        self, plan: _RampPlan, value: int, is_final: bool, vcp_code: int = VCP_D9
+    ) -> bool:
+        """Perform one Ramp write, handling a `DdcError` per the ticket:
         an intermediate write (`is_final` False) that fails is logged at
         warning and given up on immediately -- the Ramp just skips that
         hardware step. The final write instead gets one retry, after
         pausing `DEFAULT_READ_RETRY_DELAY` (the same pause the DDC read
         retry uses); if the retry also fails, the Ramp aborts: an error is
-        logged naming the writes actually performed, and the Applied state
-        is forgotten (`_forget_applied_locked`), so the next Ramp starts
-        from a fresh D9 read rather than the Target step this write could
-        not reach. Returns whether the value ended up written. Caller holds
-        `self._lock` (via `self._condition`) and is responsible for
-        recording a successful write in `plan.performed` and
-        `self._applied_brightness_step`.
+        logged naming the writes actually performed, and the Applied D9
+        state is forgotten (`_forget_applied_locked`), so the next Ramp
+        starts from a fresh D9 read rather than the Target step this write
+        could not reach. Returns whether the value ended up written.
+
+        `vcp_code` defaults to D9, every ordinary Ramp write; a
+        `power_off_after` plan's true final write (issue #35) reuses this
+        same retry-then-abort logic for D7 by passing `VCP_POWER` and
+        `is_final=True` (`_perform_power_off_after_locked`) -- forgetting
+        the Applied D9 state on that failure is a little imprecise (D9
+        itself did not fail), but it is what "as for any final write"
+        calls for, and it is a harmless extra D9 read next time either way.
+
+        Caller holds `self._lock` (via `self._condition`) and is
+        responsible for recording a successful write in `plan.performed`
+        and, for a D9 write, `self._applied_brightness_step` /
+        `self._applied_colortemp_step`.
         """
         try:
-            self._port.write_vcp(VCP_D9, value)
+            self._port.write_vcp(vcp_code, value)
             return True
         except DdcError as error:
             if not is_final:
@@ -626,7 +876,7 @@ class MoonHaloModel:
 
         time.sleep(DEFAULT_READ_RETRY_DELAY)
         try:
-            self._port.write_vcp(VCP_D9, value)
+            self._port.write_vcp(vcp_code, value)
             return True
         except DdcError as error:
             self._logger.error(

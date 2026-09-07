@@ -41,11 +41,15 @@ def _log_request(logger: logging.Logger, endpoint: str, writes: list[tuple[int, 
 def _log_move_request(
     logger: logging.Logger, endpoint: str, model: MoonHaloModel, target: Any
 ) -> None:
-    """The brightness and colortemp endpoints' success log line: the
-    immediate writes made (a Ramp's own writes are not among them) plus the
-    Transition applied, so a Ramp is traceable even though most of its
-    writes happen later on the worker thread. `target` is the Level
-    (brightness) or hardware colour step (colortemp) requested."""
+    """The on, off, brightness and colortemp endpoints' success log line:
+    the immediate writes made (a Ramp's own writes are not among them) plus
+    the Transition applied, so a Ramp is traceable even though most of its
+    writes happen later on the worker thread. For on/brightness/colortemp
+    with a non-zero Transition while the halo was dark (issue #35), both
+    immediate writes -- the relight D9 and the D7 on -- show up in
+    `model.last_writes`, in that order. `target` is the Level (on,
+    brightness), the hardware colour step (colortemp), or the literal
+    string "off"."""
     transition = model.last_transition
     logger.info(
         "endpoint=%s writes=%s target=%s transition=%ss steps=%s outcome=ok",
@@ -73,11 +77,11 @@ def _parse_level(raw: Optional[str]) -> Optional[int]:
 
 
 def _parse_transition(raw: Optional[str]) -> Optional[float]:
-    """Validate the optional `transition` query on
-    `/moonhalo/brightness/<value>` and `/moonhalo/colortemp/<value>`:
-    decimal seconds 0-60, or None when absent (the caller then falls back
-    to `config.transition_seconds`). Raises ValueError, with a message fit
-    for a 400 body, otherwise.
+    """Validate the optional `transition` query on `/moonhalo/on`,
+    `/moonhalo/off`, `/moonhalo/brightness/<value>` and
+    `/moonhalo/colortemp/<value>`: decimal seconds 0-60, or None when
+    absent (the caller then falls back to `config.transition_seconds`).
+    Raises ValueError, with a message fit for a 400 body, otherwise.
     """
     if raw is None:
         return None
@@ -172,25 +176,43 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             return jsonify({"ok": False, "error": str(error)}), 400
 
         try:
-            state = model.turn_on(level)
+            transition = _parse_transition(request.args.get("transition"))
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
+        try:
+            state = model.turn_on(level, transition)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, model.last_writes, "ok")
-        return jsonify({"ok": True, "state": state}), 200
+        _log_move_request(logger, endpoint, model, state["level"])
+        return (
+            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
+            200,
+        )
 
     @app.get("/moonhalo/off")
     def moonhalo_off():
         endpoint = "/moonhalo/off"
         try:
-            state = model.turn_off()
+            transition = _parse_transition(request.args.get("transition"))
+        except ValueError as error:
+            _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
+            return jsonify({"ok": False, "error": str(error)}), 400
+
+        try:
+            state = model.turn_off(transition)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
 
-        _log_request(logger, endpoint, model.last_writes, "ok")
-        return jsonify({"ok": True, "state": state}), 200
+        _log_move_request(logger, endpoint, model, "off")
+        return (
+            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
+            200,
+        )
 
     @app.get("/moonhalo/brightness/<value>")
     def moonhalo_brightness(value: str):
