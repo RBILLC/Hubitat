@@ -40,6 +40,16 @@ A SYNC response of type `LIGHT` with `OnOff`, `Brightness` and `ColorSetting` re
 2. **Control device**: share one Hue White Ambiance bulb (driver `hueBridgeBulbCT`, attribute set `switch, level, colorTemperature, colorName, networkStatus`) through the built-in app. If it also shows no white slider, the built-in app cannot do it for any CT-only device and explanations 1/2 hold. If it does show one, the only difference from MoonHalo is `networkStatus` vs `connectionState`, and that becomes the next single-variable driver test.
 3. **If the control bulb has no slider**: adopt the community integration. Its Color Temperature Control settings produce the `ColorSetting` + `colorTemperatureRange` SYNC that Gemini described; set the range to the driver's 2700-6500.
 
+## What the community integration's code does for a CT-only light [DOC: source read]
+
+`google-home-community.groovy` (master, 5629 lines, read 2026-09-07):
+
+- **SYNC** `attributesForTrait_ColorSetting`: with "Full-Spectrum Color Control" off and "Color Temperature Control" on it emits only `colorTemperatureRange: [temperatureMinK: <min>, temperatureMaxK: <max>]` from the two settings. No `colorModel`, so Google gets exactly the CT-only shape its docs (and Gemini) prescribe. Device type comes from the per-type "googleDeviceType" setting, so `LIGHT`.
+- **QUERY** `deviceStateForTrait_ColorSetting`: `color: [temperatureK: device.currentValue(<colorTemperatureAttribute>)]`. `colorMode` is consulted only when both controls are on.
+- **EXECUTE** `executeCommand_ColorAbsolute`: calls `device.<setColorTemperatureCommand>(temperature)` with the Kelvin Google sent, then polls up to 1 s (10 x 100 ms) for `colorTemperature == temperature`; if it never matches it answers `PENDING`, not an error, and Google follows up with QUERY. MoonHalo will always land here: the Driver replies asynchronously and the Bridge snaps Kelvin to one of seven hardware steps (5000 requested reads back 5143), so Google's slider will settle on the snapped value. Acceptable; no Driver change needed. Report State to Google is optional and needs a Google service-account JSON in the app.
+- **Driver compatibility**: MoonHalo already has `setColorTemperature(value, level, tt)` with Kelvin first, `colorTemperature` attribute, `on`/`off`, `setLevel`. Nothing to add. Set the range to the Driver's 2700–6500 preferences.
+- **Setup cost** (README): the user creates their own Google smart-home Action (README says console.actions.google.com; Google has since moved smart-home projects to the Google Home Developer Console, so the exact clicks need checking), OAuth account linking, fulfilment URL from the Hub UID, then pastes the app into Apps Code. Human-only steps; a `/wizard` candidate.
+
 ## Sources read
 
 - https://community.hubitat.com/t/147034 (JSON; Mike Maxwell post 6, 2024-12-16)
