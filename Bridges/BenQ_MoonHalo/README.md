@@ -423,6 +423,15 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long `transition` is, and a shorter `transition` drops even more of them evenly (0.4s fits about six at the monitor's ~60ms write pace). This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on` with a `transition`). This is a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
 
+## Checking a Ramp on the real halo
+
+`py tools/ramp_probe.py brightness` (or `colour`, `power`) drives the model against the real monitor
+from this folder while the serving Bridge is idle, printing every DDC/CI write with the time since
+the command, the gap from the previous write and the cost of the `SetVCPFeature` call itself. It
+works in its own state file under `tools/`, uses `config.json`'s `transition_seconds` (override with
+`--sweep`), and ends with the halo back at its remembered state. This is the hardware acceptance
+check for every Ramp ticket.
+
 ## Tests
 
 Run the full suite from the `Bridges/BenQ_MoonHalo` folder:

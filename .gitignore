@@ -11,3 +11,4 @@ Bridges/*/*.log
 
 # Local scratch used by agent skills
 .scratch/
+tools/probe_state.json
