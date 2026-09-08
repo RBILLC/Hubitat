@@ -39,3 +39,23 @@ _Avoid_: brightness percent, dim level
 **Connection state**:
 Whether the Hub could reach the Bridge on its last attempt: online, offline, or unknown. Offline is how the Driver shows a MoonHalo whose PC is powered down, like a bulb with no power.
 _Avoid_: health, presence, reachability
+
+**Transition**:
+The time over which the Bridge moves the MoonHalo from its applied setting to the target setting. Zero means the change is immediate.
+_Avoid_: fade, transition time, tt, duration (when meaning the concept)
+
+**Ramp**:
+The sequence of hardware-step writes that realises a Transition, one write per hardware step moved, evenly spaced over the Transition.
+_Avoid_: animation, interpolation
+
+**Sweep time**:
+The Transition a full nine-step brightness move takes. The Bridge's default pace and the Driver's Default transition preference are Sweep times: every move keeps the same interval between writes, a ninth of the Sweep time, so a short move finishes sooner. A Sweep time too short for every step at the monitor's write pace drops steps evenly rather than slowing down. A Transition passed with a command is instead the total time for that move.
+_Avoid_: default transition (when meaning the concept), rate, speed
+
+**Target state**:
+The MoonHalo setting most recently commanded. What the Bridge reports to the Hub, whether or not the Ramp has reached it.
+_Avoid_: requested state, desired state
+
+**Applied state**:
+The MoonHalo setting the Bridge last wrote to the monitor. Equals the Target state once a Ramp completes.
+_Avoid_: current state, actual state, hardware state

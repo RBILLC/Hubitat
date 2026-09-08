@@ -7,7 +7,8 @@
  * on the Windows PC the monitor is attached to, using its JSON contract:
  * /moonhalo/on[?level=1-100], /moonhalo/off, /moonhalo/brightness/<0-100>
  * (0 = off), /moonhalo/colortemp/<value>[?stage=1] (1-7 is a hardware step,
- * 1000 or more is Kelvin) and /moonhalo/status. Each reply is
+ * 1000 or more is Kelvin) and /moonhalo/status; the first four also take
+ * transition=<seconds> or sweep=<seconds>. Each reply is
  * {"ok": true, "state": {power, level, brightnessStep, colorTemperature,
  * colorTempStep, monitor}} or {"ok": false, "error": "..."}.
  *
@@ -19,8 +20,11 @@
  *   bulb with no power; switch and level keep their last known values.
  * - Attribute events are emitted only after the Bridge confirms a request,
  *   from the state carried in its reply. Nothing is assumed optimistically.
- * - Transition times (setLevel duration, setColorTemperature transitionTime)
- *   are accepted and ignored; the MoonHalo has no fades.
+ * - The Transition (setLevel's rate, setColorTemperature's tt) is forwarded
+ *   to the Bridge as the transition query parameter, in seconds: 0 makes the
+ *   change immediate. Without a rate, the Default transition preference (ms,
+ *   default 300) goes as the sweep query parameter in seconds; blank leaves
+ *   the Bridge default in place.
  * - on() only asks the Bridge to turn on; the Bridge restores the level it
  *   remembers (or its configured default). The Driver keeps no copy of that
  *   level: Hubitat's Google Home app sends setLevel and then on() for one
@@ -39,10 +43,18 @@
  *   timeout. Changing the typed IP or port forgets the announced address
  *   until the next announcement; saving other preferences keeps it.
  *
- * Version: 0.0.8 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.11 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-08 0.0.11 - Default transition is whole milliseconds, default 300: the decimal input would
+ *                     not accept values under 1.0 on the device page (issue #37)
+ * 2026-09-08 0.0.10 - Default transition (seconds) preference, sent as the sweep query parameter
+ *                     when a command carries no rate (issue #37)
+ * 2026-09-08 0.0.9 - setLevel's rate and setColorTemperature's tt are forwarded to the Bridge as
+ *                    the transition query parameter (seconds; 0 snaps immediately) instead of being
+ *                    ignored; a non-numeric or missing value still leaves the Bridge default in
+ *                    place (issue #36)
  * 2026-09-07 0.0.8 - setBridgeAddress(ip, port) command and bridgeAddress attribute: the Bridge
  *                    announces its LAN address through the Maker API, the Driver prefers it over
  *                    the typed IP, and a missed announcement marks the Bridge offline (issue #23)
@@ -98,6 +110,7 @@ metadata {
         input name: "ctMinKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
         input name: "ctMaxKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
         input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Store a colour temperature while the MoonHalo stays off", defaultValue: false
+        input name: "defaultTransitionMs", type: "number", title: "Default transition (ms)", description: "Time a full brightness sweep takes when a command carries no rate, in whole milliseconds (0-60000; 0 snaps); blank uses the Bridge default", defaultValue: 300, range: "0..60000"
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
@@ -231,15 +244,15 @@ private Integer announceTimeout() {
 // on() for a single slider move, and replayed the old level over the new.
 void on() {
     logDebug "on()"
-    sendBridge("/moonhalo/on", [command: "on"])
+    sendBridge("/moonhalo/on" + paceQuery(null), [command: "on"])
 }
 
 void off() {
     logDebug "off()"
-    sendBridge("/moonhalo/off", [command: "off"])
+    sendBridge("/moonhalo/off" + paceQuery(null), [command: "off"])
 }
 
-// rate (transition duration) is accepted and ignored.
+// rate is forwarded as the transition query parameter; see paceQuery.
 void setLevel(value, rate = null) {
     logDebug "setLevel(${value}, ${rate})"
     if (value == null) return
@@ -249,16 +262,16 @@ void setLevel(value, rate = null) {
         return
     }
     if (level == 0) {
-        off()
+        // Level 0 is off, but its rate still travels: the Bridge dims out over it (0 snaps).
+        sendBridge("/moonhalo/off" + paceQuery(rate), [command: "off"])
         return
     }
-    sendBridge("/moonhalo/brightness/${level}", [command: "setLevel", level: level])
+    sendBridge("/moonhalo/brightness/${level}" + paceQuery(rate), [command: "setLevel", level: level])
 }
 
-// tt (transition time) is accepted and ignored. When a level is given the
-// brightness request goes first and the colour temperature request is sent
-// from its reply, so the Bridge sees them in order and the MoonHalo is on
-// (and pre-staging does not apply) by the time the colour arrives.
+// tt is forwarded like setLevel's rate, on both requests when a level is
+// given: brightness goes first and the colour request is sent from its
+// reply, so the MoonHalo is on (and pre-staging does not apply) by then.
 void setColorTemperature(value, level = null, tt = null) {
     logDebug "setColorTemperature(${value}, ${level}, ${tt})"
     if (value == null) return
@@ -277,10 +290,11 @@ void setColorTemperature(value, level = null, tt = null) {
     String ctPath = "/moonhalo/colortemp/${kelvin}"
     Integer lvl = (level == null) ? null : limitIntegerRange(level, 0, 100)
     if (lvl != null && lvl > 0) {
-        sendBridge("/moonhalo/brightness/${lvl}", [command: "setColorTemperature", level: lvl, followUp: ctPath])
+        sendBridge("/moonhalo/brightness/${lvl}" + paceQuery(tt), [command: "setColorTemperature", level: lvl, followUp: ctPath + paceQuery(tt)])
         return
     }
-    sendBridge(ctPath + stageQuery(), [command: "setColorTemperature", colorTemperature: kelvin])
+    String stage = stageQuery()
+    sendBridge(ctPath + stage + paceQuery(tt, stage != ""), [command: "setColorTemperature", colorTemperature: kelvin])
 }
 
 void setColorTempStep(step) {
@@ -365,6 +379,39 @@ private Boolean isIpv4(String text) {
 private String stageQuery() {
     Boolean stage = (colorStaging == true) && (device.currentValue("switch") != "on")
     return stage ? "?stage=1" : ""
+}
+
+// "?transition=<value>" when value (a rate or tt) is a number, else
+// "?sweep=<preference>" when Default transition is set, else "".
+// queryStarted: the path already carries "?stage=1", so use "&".
+private String paceQuery(Object value, Boolean queryStarted = false) {
+    String separator = queryStarted ? "&" : "?"
+    if (value != null) {
+        String text = "${value}".toString().trim()
+        if (text.isNumber()) return separator + "transition=${text}"
+        logDebug "transition '${value}' is not a number; omitted"
+    }
+    String sweep = sweepSeconds()
+    return (sweep == null) ? "" : separator + "sweep=${sweep}"
+}
+
+// The Default transition preference (ms) as seconds text for the sweep query, or null if
+// blank, not a number, or outside 0-60000.
+private String sweepSeconds() {
+    Object value = settings["defaultTransitionMs"]
+    if (value == null) return null
+    String text = "${value}".toString().trim()
+    if (text == "") return null
+    if (!text.isNumber()) {
+        logDebug "Default transition '${value}' is not a number; ignored, the Bridge default applies"
+        return null
+    }
+    BigDecimal ms = text.toBigDecimal()
+    if (ms < 0 || ms > 60000) {
+        logDebug "Default transition ${text} ms is outside 0-60000; ignored, the Bridge default applies"
+        return null
+    }
+    return (ms / 1000).stripTrailingZeros().toPlainString()
 }
 
 // ---------------------------------------------------------------------------

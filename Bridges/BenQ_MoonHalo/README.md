@@ -63,6 +63,7 @@ left out of `config.json` simply uses it.
 | `maker_api_token` | `null` | The Maker API access token. Lives only in `config.json`, which is gitignored; it never appears in the log. |
 | `announce_seconds` | `60` | Seconds between address announcements (at least 1). Keep it below the Driver's **Announcement timeout** (default 200), or the Hub will mark the Bridge offline between announcements. |
 | `announce_enabled` | `null` | `null` means announce whenever the four Maker values above are set; `true` or `false` forces it. |
+| `transition_seconds` | `0.3` | The default **Sweep time**, in seconds: how long a full nine-step brightness move takes when a request carries neither `transition` nor `sweep`. Every default-paced move -- brightness, colour, dimming out, rising -- runs at the same pace, one write every `transition_seconds / 9` (never closer than the monitor's ~60ms write pace), so a two-step move ends after one interval and a nine-step one after eight. At `0.54` or more every step is written; below that the writes stay ~60ms apart and steps are dropped evenly instead (`0.3` writes six of the nine over 0.3s, and a short move gets its share of those six), so the full sweep still takes about the Sweep time. `0` makes every default-paced change immediate. The Driver's **Default transition (ms)** preference (default 300) overrides this per request via `sweep`. |
 
 **Allowlist rules.** A caller is allowed if any of these hold, checked in order: it is loopback
 and `allow_loopback` is true; both `allowed_macs` and `allowed_ips` are empty (see the warning
@@ -129,12 +130,23 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
-| `GET /moonhalo/on` | `level` (query, optional, 1-100) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. |
-| `GET /moonhalo/off` | none | Turns the halo off. Leaves the remembered level and colour step untouched. |
-| `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off. |
-| `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes and no DDC write happens. |
+| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. If the halo is already on, this moves to the level exactly like `/moonhalo/brightness` (no D7 write; the same target as a running Ramp leaves it alone). From dark with a pace of `0` it snaps: D7 on, then one D9 write, as before. From dark otherwise it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level at the pace below. |
+| `GET /moonhalo/off` | `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo off. Leaves the remembered level and colour step untouched. With a pace of `0` (or if the halo is already off and dark), it snaps: D7 off alone, as before. Otherwise it dims out -- brightness ramps from the Applied step down to step 1 at the pace below -- then writes D7 off. |
+| `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` at the pace below -- immediately if the pace is `0` or the move is at most one hardware step. |
+| `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes, no DDC write happens, and the pace is ignored. Otherwise moves to `<value>` at the pace below -- immediately if the pace is `0`. |
+
+**Pace.** The four rows above time a move the same way. `transition`, if present, is the total time this
+move takes, whatever its distance: intermediate steps are dropped evenly to fit (none closer than the
+monitor's ~60ms write pace), so a rule that passes a rate gets exactly that duration. Otherwise the
+move is paced by distance from a Sweep time -- `sweep` if present, else `transition_seconds` -- the
+time a full nine-step brightness move takes: one write every ninth of it (floored at ~60ms), every
+step written when the Sweep time is `0.54` or more, so a move of n hardware steps ends after n - 1
+intervals. A shorter Sweep time keeps the writes ~60ms apart and drops steps evenly instead: a full
+sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the same share of that,
+rounded, at least one. Either resolved to `0` snaps.
+A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.4"}`, no allowlist check, for a local liveness probe. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.6"}`, no allowlist check, for a local liveness probe. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -148,9 +160,44 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "colorTempStep": 4,
     "colorTemperature": 4600,
     "monitor": "Generic PnP Monitor"
-  }
+  },
+  "transition": {"seconds": 0.0, "steps": 1}
 }
 ```
+
+An on, off, brightness or colortemp reply always carries a `transition` object reporting the Transition actually
+applied: `seconds` is the planned duration (the `transition` value for a total-time move; `steps - 1` intervals for
+a Sweep-paced one, so `0.0` when it collapses to a single write), and
+`steps` is how many D9 writes it takes to get there -- `1` for an immediate change, `0` when no D9 write is needed:
+a staged colortemp call (`stage=1` while off) writes nothing at all, and off writes D7 alone when it snaps
+(`transition=0`, or a halo already dark) or dims out from brightness step 1. The reply returns as soon as the change is accepted; when `steps` is more
+than 1, the writes themselves continue in the background for up to `seconds` more. For example,
+`GET /moonhalo/brightness/100?transition=1.2` starts a longer Ramp and replies immediately:
+
+```
+curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
+```
+
+```json
+{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}}
+```
+
+The same move from step 1 with `sweep=0.9` (or `transition_seconds` 0.9 and no query) reports
+`{"seconds": 0.8, "steps": 9}`: nine writes 100ms apart, the last due 0.8s after the first; with
+`sweep=0.3` it reports `{"seconds": 0.3, "steps": 6}`, six writes 60ms apart. The request line in
+`bridge.log` shows the same two numbers as `transition=0.8s steps=9`.
+
+A brightness command and a colortemp command share one Ramp: a command that arrives while the other's Ramp is
+still running retargets it from wherever it has reached, moving both the brightness and colour bytes together, so
+`GET /moonhalo/brightness/100?transition=1.0` followed shortly by `GET /moonhalo/colortemp/7?transition=1.0` ends
+as a single combined move to brightness step 10 and colour step 7, not two separate ones. A command whose target
+already matches a Ramp already heading there on both axes leaves it running untouched; an explicit `transition=0`
+always cancels any running Ramp and snaps to the target at once.
+
+Turning off and on again also retargets rather than restarts. An off arriving while brightness is still rising turns
+the Ramp around into a dim-out that ends in D7 off; an on, brightness, or colour command arriving while the halo is
+still dimming out turns it back around and rises to the new target -- D7 off is never written, since the halo was lit
+the whole time, and the relight sequence above does not repeat (that would flash).
 
 ## Letting the Hub find the Bridge
 
@@ -221,6 +268,7 @@ Run these from the `Bridges/BenQ_MoonHalo` folder, with or without `--dry-run`:
 
 ```
 py -m moonhalo_bridge monitors
+py -m moonhalo_bridge capabilities
 py -m moonhalo_bridge read D9
 py -m moonhalo_bridge write D7 544
 ```
@@ -228,6 +276,16 @@ py -m moonhalo_bridge write D7 544
 `monitors` lists every attached physical monitor. `read <code>` reads a VCP register given as
 hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>` writes a
 value (decimal or `0x`-hex) to a VCP register and reads it back to confirm.
+
+`capabilities` reads the monitor's own DDC/CI capabilities string and prints it verbatim, then
+a blank line, then every VCP register it advertises, one per line in the monitor's own order,
+each formatted as a bare code (`  D9`) or a code with its advertised list of values
+(`  7E  (0F 11 13)`). Like `read`, it retries a transient failure up to three times, 50ms
+apart -- Microsoft documents both underlying calls as "usually returns quickly, but sometimes
+it can take several seconds to complete", and issue #28 saw exactly that on the RD280UG. The
+RD280UG's own capabilities string, the parsing grammar, and its full VCP register inventory are
+recorded in `docs/research/rd280ug-capabilities.md`; `--dry-run` pre-loads that exact string so
+`capabilities` has something real to parse with no hardware attached.
 
 **Caution: `write` changes the monitor immediately, with no confirmation prompt.** Only the
 values verified on the RD280UG on 2026-09-03 are known-good: `write D7 544` (0x0220, on at 360
@@ -379,6 +437,17 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
+| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition (ms)** preference as `sweep`) keeps that pace at any Sweep time of `0.54` or less, writing fewer of the nine steps the shorter it is (six at `0.3`, which looked smooth on the real halo); a longer Sweep time spaces the writes out, which is what reads as stepping. An explicit `transition` from a rule is a total time and spreads its writes over exactly that, so a long one steps visibly too -- pass a shorter time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
+| `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
+
+## Checking a Ramp on the real halo
+
+`py tools/ramp_probe.py brightness` (or `colour`, `power`) drives the model against the real monitor
+from this folder while the serving Bridge is idle, printing every DDC/CI write with the time since
+the command, the gap from the previous write and the cost of the `SetVCPFeature` call itself. It
+works in its own state file under `tools/`, uses `config.json`'s `transition_seconds` as the Sweep time
+(override with `--sweep`), and ends with the halo back at its remembered state. This is the hardware acceptance
+check for every Ramp ticket.
 
 ## Tests
 
