@@ -51,9 +51,10 @@ when the Hub cannot talk to a device directly.
   instead of turning it on.
 - **Default transition (seconds)** — how long a full brightness sweep takes when a command
   carries no rate of its own (0 to 60; 0 snaps). Every move runs at that pace, so a short move
-  finishes sooner. Blank (the default) sends nothing and the Bridge's own `transition_seconds`
-  applies. A rate passed to setLevel or setColorTemperature still means the total time for that
-  move and wins.
+  finishes sooner. Below about 0.5 the Bridge writes fewer of the halo's ten levels rather than
+  slowing down (0.3 looked smooth on the real halo). Blank (the default) sends nothing and the
+  Bridge's own `transition_seconds` applies. A rate passed to setLevel or setColorTemperature
+  still means the total time for that move and wins.
 - **Enable debug logging** and **Enable description text logging** — as in Hubitat's other
   drivers; debug logging turns itself off after 30 minutes.
 

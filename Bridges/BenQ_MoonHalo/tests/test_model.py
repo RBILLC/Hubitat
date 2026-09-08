@@ -175,10 +175,12 @@ class TestBrightnessScaling(unittest.TestCase):
 class TestPacingSchedule(unittest.TestCase):
     """Issue #37: how a move of n hardware steps is timed. A Sweep time
     (the configured default, or a `sweep` query) fixes the interval between
-    writes at a ninth of itself, floored at the write floor, and never
-    drops a step, so a move takes (n - 1) intervals; an explicit
-    `transition` is the total time for this move, intermediates dropped to
-    fit, as before. Zero snaps either way."""
+    writes at a ninth of itself, floored at the write floor, so a move
+    takes (k - 1) intervals; every step is written when the Sweep time
+    allows nine writes at the floor (0.54 s), and below that steps are
+    dropped evenly instead of slowing the writes (the 2026-09-08 amendment
+    on #30). An explicit `transition` is the total time for this move,
+    intermediates dropped to fit, as before. Zero snaps either way."""
 
     def test_nine_steps_span_a_full_brightness_move(self):
         self.assertEqual(SWEEP_STEPS, 9)
@@ -188,11 +190,29 @@ class TestPacingSchedule(unittest.TestCase):
         self.assertAlmostEqual(Pacing.sweep(0.4).interval, WRITE_FLOOR_SECONDS)
         self.assertAlmostEqual(Pacing.sweep(0.6).interval, WRITE_FLOOR_SECONDS + 0.2 / 30)
 
-    def test_sweep_paced_move_never_drops_a_step_and_takes_n_minus_1_intervals(self):
-        self.assertEqual(Pacing.sweep(0.4).schedule(9), (9, 0.48))
+    def test_sweep_of_nine_floors_or_more_writes_every_step_n_minus_1_intervals_apart(self):
+        self.assertEqual(Pacing.sweep(0.54).full_writes, 9)
+        self.assertEqual(Pacing.sweep(0.54).schedule(9), (9, 0.48))
         self.assertEqual(Pacing.sweep(0.9).schedule(9), (9, 0.8))
-        self.assertEqual(Pacing.sweep(0.4).schedule(2), (2, 0.06))
+        self.assertEqual(Pacing.sweep(0.54).schedule(2), (2, 0.06))
         self.assertEqual(Pacing.sweep(0.9).schedule(6), (6, 0.5))
+
+    def test_shorter_sweep_keeps_the_floor_pace_and_drops_steps_evenly(self):
+        # 0.3 s fits six writes one floor apart: a full sweep is six
+        # writes over 0.30 s, and a move gets its share of those six.
+        self.assertEqual(Pacing.sweep(0.3).full_writes, 6)
+        self.assertEqual(Pacing.sweep(0.3).schedule(9), (6, 0.3))
+        self.assertEqual(Pacing.sweep(0.3).schedule(7), (5, 0.24))
+        self.assertEqual(Pacing.sweep(0.3).schedule(5), (3, 0.12))
+        self.assertEqual(Pacing.sweep(0.3).schedule(2), (1, 0.0))
+        self.assertEqual(Pacing.sweep(0.4).full_writes, 7)
+        self.assertEqual(Pacing.sweep(0.4).schedule(9), (7, 0.36))
+        self.assertEqual(Pacing.sweep(0.4).schedule(2), (2, 0.06))
+        self.assertEqual(Pacing.sweep(0.12).schedule(9), (3, 0.12))
+
+    def test_sweep_below_one_floor_is_a_single_write(self):
+        self.assertEqual(Pacing.sweep(0.05).full_writes, 1)
+        self.assertEqual(Pacing.sweep(0.05).schedule(9), (1, 0.0))
 
     def test_sweep_paced_single_step_or_no_move_is_immediate(self):
         self.assertEqual(Pacing.sweep(0.6).schedule(1), (1, 0.0))

@@ -63,7 +63,7 @@ left out of `config.json` simply uses it.
 | `maker_api_token` | `null` | The Maker API access token. Lives only in `config.json`, which is gitignored; it never appears in the log. |
 | `announce_seconds` | `60` | Seconds between address announcements (at least 1). Keep it below the Driver's **Announcement timeout** (default 200), or the Hub will mark the Bridge offline between announcements. |
 | `announce_enabled` | `null` | `null` means announce whenever the four Maker values above are set; `true` or `false` forces it. |
-| `transition_seconds` | `0.6` | The default **Sweep time**, in seconds: how long a full nine-step brightness move takes when a request carries neither `transition` nor `sweep`. Every default-paced move -- brightness, colour, dimming out, rising -- runs at the same pace, one write every `transition_seconds / 9` (never closer than the monitor's ~60ms write pace), with no step dropped, so a two-step move ends after one interval and a nine-step one after eight. `0` makes every default-paced change immediate. The Driver's **Default transition** preference overrides this per request via `sweep`. |
+| `transition_seconds` | `0.6` | The default **Sweep time**, in seconds: how long a full nine-step brightness move takes when a request carries neither `transition` nor `sweep`. Every default-paced move -- brightness, colour, dimming out, rising -- runs at the same pace, one write every `transition_seconds / 9` (never closer than the monitor's ~60ms write pace), so a two-step move ends after one interval and a nine-step one after eight. At `0.54` or more every step is written; below that the writes stay ~60ms apart and steps are dropped evenly instead (`0.3` writes six of the nine over 0.3s, and a short move gets its share of those six), so the full sweep still takes about the Sweep time. `0` makes every default-paced change immediate. The Driver's **Default transition** preference overrides this per request via `sweep`. |
 
 **Allowlist rules.** A caller is allowed if any of these hold, checked in order: it is loopback
 and `allow_loopback` is true; both `allowed_macs` and `allowed_ips` are empty (see the warning
@@ -139,8 +139,11 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 move takes, whatever its distance: intermediate steps are dropped evenly to fit (none closer than the
 monitor's ~60ms write pace), so a rule that passes a rate gets exactly that duration. Otherwise the
 move is paced by distance from a Sweep time -- `sweep` if present, else `transition_seconds` -- the
-time a full nine-step brightness move takes: one write every ninth of it (floored at ~60ms), no step
-dropped, so a move of n hardware steps ends after n - 1 intervals. Either resolved to `0` snaps.
+time a full nine-step brightness move takes: one write every ninth of it (floored at ~60ms), every
+step written when the Sweep time is `0.54` or more, so a move of n hardware steps ends after n - 1
+intervals. A shorter Sweep time keeps the writes ~60ms apart and drops steps evenly instead: a full
+sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the same share of that,
+rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
 | `GET /health` | none | `{"ok": true, "version": "0.0.6"}`, no allowlist check, for a local liveness probe. |
@@ -180,8 +183,9 @@ curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
 ```
 
 The same move from step 1 with `sweep=0.9` (or `transition_seconds` 0.9 and no query) reports
-`{"seconds": 0.8, "steps": 9}`: nine writes 100ms apart, the last due 0.8s after the first. The request
-line in `bridge.log` shows the same two numbers as `transition=0.8s steps=9`.
+`{"seconds": 0.8, "steps": 9}`: nine writes 100ms apart, the last due 0.8s after the first; with
+`sweep=0.3` it reports `{"seconds": 0.3, "steps": 6}`, six writes 60ms apart. The request line in
+`bridge.log` shows the same two numbers as `transition=0.8s steps=9`.
 
 A brightness command and a colortemp command share one Ramp: a command that arrives while the other's Ramp is
 still running retargets it from wherever it has reached, moving both the brightness and colour bytes together, so
@@ -433,7 +437,7 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
-| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition** preference as `sweep`) never drops a step, so lower the Sweep time towards `0.5` to close the gaps. An explicit `transition` from a rule is a total time and drops steps to fit (0.4s fits about six), which reads as stepping on a short move -- pass a longer time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
+| A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition** preference as `sweep`) keeps that pace at any Sweep time of `0.54` or less, writing fewer of the nine steps the shorter it is (six at `0.3`, which looked smooth on the real halo); a longer Sweep time spaces the writes out, which is what reads as stepping. An explicit `transition` from a rule is a total time and spreads its writes over exactly that, so a long one steps visibly too -- pass a shorter time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
 
 ## Checking a Ramp on the real halo

@@ -24,12 +24,16 @@ How a Ramp is timed is a `Pacing` (issue #37). The configured default
 (`config.transition_seconds`) and a command's `sweep` are a **Sweep time**:
 the Transition a full nine-step brightness move takes, from which every
 move takes the same interval between writes (`Pacing.interval`, a ninth of
-the Sweep time, floored at `WRITE_FLOOR_SECONDS`) and never drops a step,
-so a move of n hardware steps ends after (n - 1) intervals and a short
-move finishes sooner. A command's explicit `transition` is instead the
-total time for that move, intermediates dropped to fit -- the meaning a
-rule passing a rate expects. Either resolved to 0 snaps. `Pacing.schedule`
-is the one place both rules live.
+the Sweep time, floored at `WRITE_FLOOR_SECONDS`), so a move of n hardware
+steps ends after (n - 1) intervals and a short move finishes sooner. A
+Sweep time of at least nine write floors writes every step; a shorter one
+(the 2026-09-08 amendment on #30) keeps the writes at the floor and drops
+steps evenly instead -- `Pacing.full_writes` of the nine for a full move,
+the same share of a shorter one -- so the full sweep still takes about the
+Sweep time. A command's explicit `transition` is instead the total time for
+that move, intermediates dropped to fit -- the meaning a rule passing a
+rate expects. Either resolved to 0 snaps. `Pacing.schedule` is the one
+place both rules live.
 
 A DDC/CI failure mid-Ramp does not fail the Hub's already-answered request
 (see `_perform_ramp_write_locked`): an intermediate write is skipped, but
@@ -128,9 +132,11 @@ class Pacing:
     """How a move is timed (issue #37; see the module docstring). `seconds`
     is a Sweep time when `by_distance` is true (`Pacing.sweep`): the
     Transition a full nine-step brightness move takes, from which every
-    move gets the same `interval` between writes and no step is dropped.
-    Otherwise (`Pacing.total`) it is the total time for this one move, the
-    explicit `transition` a command carried, intermediates dropped to fit.
+    move gets the same `interval` between writes; a Sweep time too short
+    for nine writes at the floor drops steps evenly (`full_writes`) rather
+    than slowing down. Otherwise (`Pacing.total`) it is the total time for
+    this one move, the explicit `transition` a command carried,
+    intermediates dropped to fit.
     """
 
     seconds: float
@@ -155,6 +161,17 @@ class Pacing:
         ninth of the Sweep time, never below `WRITE_FLOOR_SECONDS`."""
         return max(self.seconds / SWEEP_STEPS, WRITE_FLOOR_SECONDS)
 
+    @property
+    def full_writes(self) -> int:
+        """How many of the nine steps a Sweep-paced full brightness move
+        writes: all nine when the Sweep time allows a ninth of itself
+        between writes at or above the floor; otherwise as many as fit
+        one floor apart within the Sweep time (`1 + seconds // floor`, at
+        least one), so the full sweep still takes about the Sweep time
+        and the writes stay back-to-back at the bus pace."""
+        fitting = 1 + int(self.seconds / WRITE_FLOOR_SECONDS + 1e-9)
+        return max(1, min(SWEEP_STEPS, fitting))
+
     def schedule(self, steps_delta: int) -> tuple[int, float]:
         """The number of writes a move of `steps_delta` hardware steps
         makes under this pacing, and the planned duration in seconds --
@@ -164,16 +181,19 @@ class Pacing:
         No delta: zero writes; a total-time pacing still reports its
         seconds (the reply echoes the `transition` asked for, as it always
         has), a Sweep one reports 0. Zero seconds: one write, at once. A
-        Sweep: every step is written, so (n, (n - 1) * interval). A total
-        time: as many of the n steps as fit at `WRITE_FLOOR_SECONDS`,
-        at least one, spread over exactly `seconds`.
+        Sweep: the move's share of `full_writes` (all n steps when the
+        Sweep time allows every step; otherwise `full_writes * n / 9`,
+        rounded, at least one), one `interval` apart, so (k, (k - 1) *
+        interval). A total time: as many of the n steps as fit at
+        `WRITE_FLOOR_SECONDS`, at least one, spread over exactly `seconds`.
         """
         if steps_delta <= 0:
             return 0, 0.0 if self.by_distance else self.seconds
         if self.snaps:
             return 1, 0.0
         if self.by_distance:
-            return steps_delta, round((steps_delta - 1) * self.interval, 3)
+            writes = max(1, min(steps_delta, round(self.full_writes * steps_delta / SWEEP_STEPS)))
+            return writes, round((writes - 1) * self.interval, 3)
         return max(1, min(steps_delta, int(self.seconds // WRITE_FLOOR_SECONDS))), self.seconds
 
 
@@ -574,8 +594,9 @@ class MoonHaloModel:
         - Otherwise a Ramp is planned from the current Applied state to
           the new Target: the move is the larger of the two axes' deltas
           in hardware steps, `pacing.schedule` decides how many writes
-          that is and how long they take (every step, one interval apart,
-          for a Sweep time; intermediates dropped evenly to fit an
+          that is and how long they take (one interval apart for a Sweep
+          time, every step unless the Sweep time is too short for nine
+          writes at the floor; intermediates dropped evenly to fit an
           explicit total time, none closer than `WRITE_FLOOR_SECONDS`),
           and both bytes are spread evenly across those writes and
           rounded -- so a Ramp already running is retargeted (continuing
