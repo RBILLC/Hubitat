@@ -20,6 +20,17 @@ can differ while a Ramp is in flight. A newer command retargets the plan
 from wherever the Applied state currently is, rather than restarting it;
 a command whose Target already matches a Ramp in flight leaves it alone.
 
+How a Ramp is timed is a `Pacing` (issue #37). The configured default
+(`config.transition_seconds`) and a command's `sweep` are a **Sweep time**:
+the Transition a full nine-step brightness move takes, from which every
+move takes the same interval between writes (`Pacing.interval`, a ninth of
+the Sweep time, floored at `WRITE_FLOOR_SECONDS`) and never drops a step,
+so a move of n hardware steps ends after (n - 1) intervals and a short
+move finishes sooner. A command's explicit `transition` is instead the
+total time for that move, intermediates dropped to fit -- the meaning a
+rule passing a rate expects. Either resolved to 0 snaps. `Pacing.schedule`
+is the one place both rules live.
+
 A DDC/CI failure mid-Ramp does not fail the Hub's already-answered request
 (see `_perform_ramp_write_locked`): an intermediate write is skipped, but
 the final write gets one retry, and if that also fails the Applied state
@@ -70,6 +81,9 @@ VCP_D9 = 0xD9
 #: Measured cost of one SetVCPFeature write on this monitor (55-65ms, issue
 #: #29): a Ramp never schedules writes closer together than this.
 WRITE_FLOOR_SECONDS = 0.06
+#: Hardware steps in a full brightness move (step 1 to 10): a Sweep time is
+#: the Transition such a move takes, so a Ramp's interval is a ninth of it.
+SWEEP_STEPS = 9
 
 
 @dataclass
@@ -96,15 +110,71 @@ class MoonHaloState:
 
 @dataclass(frozen=True)
 class Transition:
-    """The Transition the Bridge applied (or is applying) for a brightness reply:
-    `seconds` is the Transition used, `steps` the number of D9 writes it
-    takes (always 1 for an immediate change)."""
+    """The Transition the Bridge applied (or is applying), for a reply:
+    `seconds` is the planned duration -- the explicit `transition` for a
+    total-time move, (n - 1) intervals for a Sweep-paced one -- and
+    `steps` the number of D9 writes it takes (always 1 for an immediate
+    change)."""
 
     seconds: float
     steps: int
 
     def to_dict(self) -> dict[str, Any]:
         return {"seconds": self.seconds, "steps": self.steps}
+
+
+@dataclass(frozen=True)
+class Pacing:
+    """How a move is timed (issue #37; see the module docstring). `seconds`
+    is a Sweep time when `by_distance` is true (`Pacing.sweep`): the
+    Transition a full nine-step brightness move takes, from which every
+    move gets the same `interval` between writes and no step is dropped.
+    Otherwise (`Pacing.total`) it is the total time for this one move, the
+    explicit `transition` a command carried, intermediates dropped to fit.
+    """
+
+    seconds: float
+    by_distance: bool
+
+    @classmethod
+    def sweep(cls, seconds: float) -> "Pacing":
+        return cls(float(seconds), True)
+
+    @classmethod
+    def total(cls, seconds: float) -> "Pacing":
+        return cls(float(seconds), False)
+
+    @property
+    def snaps(self) -> bool:
+        """Zero seconds, either way: the change is immediate."""
+        return self.seconds == 0
+
+    @property
+    def interval(self) -> float:
+        """Seconds between consecutive writes of a Sweep-paced Ramp: a
+        ninth of the Sweep time, never below `WRITE_FLOOR_SECONDS`."""
+        return max(self.seconds / SWEEP_STEPS, WRITE_FLOOR_SECONDS)
+
+    def schedule(self, steps_delta: int) -> tuple[int, float]:
+        """The number of writes a move of `steps_delta` hardware steps
+        makes under this pacing, and the planned duration in seconds --
+        how long after the first write the last one is due (rounded to
+        the millisecond) -- to report in the reply's Transition.
+
+        No delta: zero writes; a total-time pacing still reports its
+        seconds (the reply echoes the `transition` asked for, as it always
+        has), a Sweep one reports 0. Zero seconds: one write, at once. A
+        Sweep: every step is written, so (n, (n - 1) * interval). A total
+        time: as many of the n steps as fit at `WRITE_FLOOR_SECONDS`,
+        at least one, spread over exactly `seconds`.
+        """
+        if steps_delta <= 0:
+            return 0, 0.0 if self.by_distance else self.seconds
+        if self.snaps:
+            return 1, 0.0
+        if self.by_distance:
+            return steps_delta, round((steps_delta - 1) * self.interval, 3)
+        return max(1, min(steps_delta, int(self.seconds // WRITE_FLOOR_SECONDS))), self.seconds
 
 
 @dataclass
@@ -114,9 +184,10 @@ class _RampPlan:
     `steps` is every write the Ramp makes, in order, each a `(due_at,
     colortemp_step, brightness_step)` triple with `due_at` a
     `time.monotonic()` deadline; `next_index` is the index of the next one
-    not yet performed. `target_colortemp_step` and `target_brightness_step`
-    are the Ramp's destination on each axis, for the completion/cancel log
-    lines. `performed` records the writes actually made (a failed write is
+    not yet performed. `planned_seconds` is the duration the reply
+    reported (see `Pacing.schedule`), repeated by the same-target rule.
+    `target_colortemp_step` and `target_brightness_step` are the Ramp's
+    destination on each axis, for the completion/cancel log lines. `performed` records the writes actually made (a failed write is
     skipped, not recorded) for the completion log line.
 
     `power_off_after` (issue #35) marks a `turn_off` Ramp: once every step
@@ -130,7 +201,7 @@ class _RampPlan:
 
     target_colortemp_step: int
     target_brightness_step: int
-    transition_seconds: float
+    planned_seconds: float
     steps: list[tuple[float, int, int]]
     start_time: float
     next_index: int = 0
@@ -276,7 +347,12 @@ class MoonHaloModel:
             json.dump(self._state.to_dict(), handle)
         tmp_path.replace(self._state_file)
 
-    def turn_on(self, level: Optional[int] = None, transition: Optional[float] = None) -> dict[str, Any]:
+    def turn_on(
+        self,
+        level: Optional[int] = None,
+        transition: Optional[float] = None,
+        sweep: Optional[float] = None,
+    ) -> dict[str, Any]:
         """Resolve the level to apply -- `level` if given, else the
         remembered last level, else the configured default -- and reach it
         through the shared planner (`_plan_move_locked`), keeping the
@@ -284,9 +360,9 @@ class MoonHaloModel:
         #35): when the halo is already on this behaves like a `set_level`
         to that level (the same-target-Ramp rule included, which is what
         keeps a Google Home setLevel-then-on pair from stuttering); when
-        it is dark, `transition` decides between today's D7-then-D9 snap
-        (0, the default `resolved_transition` when the caller wants an
-        immediate change) and the D9-then-D7 relight-and-Ramp sequence
+        it is dark, the pacing (`_resolve_pacing`: `transition`, else
+        `sweep`, else the configured Sweep time) decides between today's
+        D7-then-D9 snap (0) and the D9-then-D7 relight-and-Ramp sequence
         (non-zero; see the module docstring)."""
         with self._lock:
             resolved_level = (
@@ -298,18 +374,20 @@ class MoonHaloModel:
                     else self._config.default_on_level
                 )
             )
-            resolved_transition = self._resolve_transition(transition)
             return self._plan_move_locked(
                 None,
                 level_to_brightness_step(resolved_level),
-                resolved_transition,
+                self._resolve_pacing(transition, sweep),
                 last_level=resolved_level,
             )
 
-    def turn_off(self, transition: Optional[float] = None) -> dict[str, Any]:
-        """Turn the MoonHalo off over `transition` seconds (default
-        `config.transition_seconds`); see CONTEXT.md's Transition/Ramp
-        glossary and issue #35.
+    def turn_off(
+        self, transition: Optional[float] = None, sweep: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Turn the MoonHalo off, paced by `transition` (total time), else
+        `sweep`, else the configured Sweep time (`_resolve_pacing`); see
+        CONTEXT.md's Transition/Ramp/Sweep time glossary and issues #35
+        and #37.
 
         Not lit right now (`_halo_lit_locked` false: Target power not
         "on", and no dim-out Ramp with `power_off_after` still in flight)
@@ -317,10 +395,10 @@ class MoonHaloModel:
         Target power is "unknown": write D7 off alone, a harmless re-sync,
         regardless of `transition`.
 
-        Lit, with `transition` resolving to 0: cancel any Ramp and snap
+        Lit, with the pacing resolving to 0: cancel any Ramp and snap
         straight to D7 off, exactly as before #35.
 
-        Otherwise (lit, non-zero transition): Target power becomes "off"
+        Otherwise (lit, non-zero pacing): Target power becomes "off"
         at once -- `brightness_step`, `colortemp_step` and `last_level`
         are left untouched, so `status` already reports level 0 and a
         following `turn_on` restores the level -- and a Ramp is planned
@@ -334,8 +412,8 @@ class MoonHaloModel:
         arriving mid ramp-up retargets into a ramp-down ending in D7 off.
         """
         with self._lock:
-            resolved_transition = self._resolve_transition(transition)
-            if not self._halo_lit_locked() or resolved_transition == 0:
+            pacing = self._resolve_pacing(transition, sweep)
+            if not self._halo_lit_locked() or pacing.snaps:
                 self._cancel_ramp_locked()
                 return self._write_power_off_now_locked()
 
@@ -343,7 +421,7 @@ class MoonHaloModel:
             applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
             applied_brightness_step = self._resolve_applied_brightness_step_locked()
             self._plan_power_off_ramp_locked(
-                applied_colortemp_step, applied_brightness_step, resolved_transition
+                applied_colortemp_step, applied_brightness_step, pacing
             )
             self._state.power = "off"
             self.last_writes = []
@@ -351,10 +429,17 @@ class MoonHaloModel:
             self._condition.notify_all()
             return self._status_locked()
 
-    def _resolve_transition(self, transition: Optional[float]) -> float:
-        """The Transition a command runs with: the one it carried, else
-        `config.transition_seconds`. An explicit 0 stays 0 (a snap)."""
-        return self._config.transition_seconds if transition is None else transition
+    def _resolve_pacing(self, transition: Optional[float], sweep: Optional[float]) -> Pacing:
+        """The `Pacing` a command runs with (issue #37): its explicit
+        `transition` (the total time for this move) if it carried one,
+        else its `sweep` (a Sweep time for this command) if it carried
+        one, else `config.transition_seconds` as the Sweep time. An
+        explicit 0 stays 0 (a snap) either way."""
+        if transition is not None:
+            return Pacing.total(transition)
+        if sweep is not None:
+            return Pacing.sweep(sweep)
+        return Pacing.sweep(self._config.transition_seconds)
 
     def _halo_lit_locked(self) -> bool:
         """Whether the monitor is actually emitting light right now, as
@@ -383,21 +468,26 @@ class MoonHaloModel:
         self._save_state()
         return self._status_locked()
 
-    def set_level(self, level: int, transition: Optional[float] = None) -> dict[str, Any]:
-        """Set MoonHalo brightness to `level` (0-100) over `transition`
-        seconds (default `config.transition_seconds`). Level 0 delegates
-        to `turn_off` with the same `transition` (issue #35: a Transition
-        applies to dimming out too, not just to snapping off). Otherwise
+    def set_level(
+        self, level: int, transition: Optional[float] = None, sweep: Optional[float] = None
+    ) -> dict[str, Any]:
+        """Set MoonHalo brightness to `level` (0-100), paced by
+        `transition` (total time), else `sweep`, else the configured Sweep
+        time (`_resolve_pacing`). Level 0 delegates to `turn_off` with the
+        same pacing (issue #35: a Transition applies to dimming out too,
+        not just to snapping off). Otherwise
         goes through the shared planner (see `_plan_move_locked`), keeping
         the current Target colour step, powering on first if not already
         on.
         """
         if level == 0:
-            return self.turn_off(transition)
+            return self.turn_off(transition, sweep)
         with self._lock:
-            resolved_transition = self._resolve_transition(transition)
             return self._plan_move_locked(
-                None, level_to_brightness_step(level), resolved_transition, last_level=level
+                None,
+                level_to_brightness_step(level),
+                self._resolve_pacing(transition, sweep),
+                last_level=level,
             )
 
     def _write_move_now_locked(
@@ -405,16 +495,16 @@ class MoonHaloModel:
         colortemp_step: int,
         brightness_step: int,
         writes: list[tuple[int, int]],
-        transition_seconds: float,
+        planned_seconds: float,
         last_level: Optional[int],
     ) -> dict[str, Any]:
         """Perform one synchronous D9 write to `(colortemp_step,
-        brightness_step)`, used by `_plan_move_locked` when
-        `transition_seconds` is 0, the move collapses to one write, or
-        there is no delta on either axis. `writes` already holds any
-        immediate D7 write (or, per issue #35, the D9-then-D7 relight
-        pair a power-on-with-Transition sequence just made);
-        `transition_seconds` is echoed back in `last_transition` even
+        brightness_step)`, used by `_plan_move_locked` when the pacing
+        snaps, the move collapses to one write, or there is no delta on
+        either axis. `writes` already holds any immediate D7 write (or,
+        per issue #35, the D9-then-D7 relight pair a
+        power-on-with-Transition sequence just made); `planned_seconds`
+        (from `Pacing.schedule`) is what `last_transition` reports even
         though only one write happens here. `last_level`, when given,
         replaces the remembered Level. Caller holds `self._lock`."""
         d9_value = pack_d9(colortemp_step, brightness_step)
@@ -428,7 +518,7 @@ class MoonHaloModel:
         if last_level is not None:
             self._state.last_level = last_level
         self.last_writes = writes
-        self.last_transition = Transition(seconds=float(transition_seconds), steps=1)
+        self.last_transition = Transition(seconds=float(planned_seconds), steps=1)
         self._save_state()
         return self._status_locked()
 
@@ -436,14 +526,14 @@ class MoonHaloModel:
         self,
         new_colortemp_step: Optional[int],
         new_brightness_step: Optional[int],
-        transition_seconds: float,
+        pacing: Pacing,
         *,
         last_level: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Reach a new Target, given `transition_seconds`, either
-        synchronously or by (re)planning a Ramp from the current Applied
-        state. Shared by `turn_on`, `set_level` and `set_colortemp`.
-        Caller holds `self._lock`.
+        """Reach a new Target, timed by `pacing`, either synchronously or
+        by (re)planning a Ramp from the current Applied state. Shared by
+        `turn_on`, `set_level` and `set_colortemp`. Caller holds
+        `self._lock`.
 
         Exactly one of `new_colortemp_step` / `new_brightness_step` is the
         axis being commanded; the other is `None`, meaning "keep the
@@ -459,15 +549,15 @@ class MoonHaloModel:
           on *both* axes leaves that Ramp completely untouched: no new
           writes, and the reply reports the running Ramp's own Transition.
           (A command that changes either axis retargets the plan instead,
-          and an explicit `transition_seconds` of 0 always snaps.)
+          and a pacing that snaps always snaps.)
         - Lit already (`_halo_lit_locked`, issue #35) -- genuinely on, or
           mid dim-out with D7 off not yet written -- retargets straight to
           "on" with no D7 write at all: repeating the relight sequence
           below would flash, and a genuinely-on halo needs no D7 write
           anyway.
-        - Dark, with `transition_seconds == 0`: today's D7-then-D9 snap,
+        - Dark, with a pacing that snaps: today's D7-then-D9 snap,
           unchanged since #29.
-        - Dark, with a non-zero `transition_seconds` (issue #35): D9 is
+        - Dark, with a non-zero pacing (issue #35): D9 is
           written at the target colour step and brightness step 1, then
           D7 on -- issue #29 showed a D9 write while off is applied and
           relights the halo at the new value with no flash on the
@@ -479,17 +569,20 @@ class MoonHaloModel:
           reporting the Transition as one step (the immediate write) with
           no further Ramp -- a second, identical D9 write would be a
           wasted DDC call.
-        - `transition_seconds == 0`, or no delta on either axis, writes
-          once, synchronously.
+        - A pacing that snaps, or no delta on either axis, writes once,
+          synchronously.
         - Otherwise a Ramp is planned from the current Applied state to
-          the new Target: the step count is the larger of the two axes'
-          deltas in hardware steps, both bytes spread evenly
-          across it and rounded, dropping intermediate steps evenly so no
-          write is scheduled closer than `WRITE_FLOOR_SECONDS` to the last
-          -- so a Ramp already running is retargeted (continuing from
-          wherever it has reached) rather than restarted, and a lone
-          colour change or one landing mid-brightness-Ramp both become one
-          combined sequence of D9 writes.
+          the new Target: the move is the larger of the two axes' deltas
+          in hardware steps, `pacing.schedule` decides how many writes
+          that is and how long they take (every step, one interval apart,
+          for a Sweep time; intermediates dropped evenly to fit an
+          explicit total time, none closer than `WRITE_FLOOR_SECONDS`),
+          and both bytes are spread evenly across those writes and
+          rounded -- so a Ramp already running is retargeted (continuing
+          from wherever it has reached, at the new command's pace) rather
+          than restarted, and a lone colour change or one landing
+          mid-brightness-Ramp both become one combined sequence of D9
+          writes.
         """
         target_colortemp_step = (
             new_colortemp_step
@@ -509,7 +602,7 @@ class MoonHaloModel:
             and not self._ramp_plan.power_off_after
             and target_colortemp_step == self._state.colortemp_step
             and target_brightness_step == self._state.brightness_step
-            and transition_seconds != 0
+            and not pacing.snaps
         ):
             # An explicit 0 is a request to snap, so it falls through to
             # cancel the Ramp and write the target at once. A running
@@ -528,7 +621,7 @@ class MoonHaloModel:
                 self._save_state()
             self.last_writes = []
             self.last_transition = Transition(
-                seconds=plan.transition_seconds, steps=len(plan.steps)
+                seconds=plan.planned_seconds, steps=len(plan.steps)
             )
             return self._status_locked()
 
@@ -543,7 +636,7 @@ class MoonHaloModel:
             self._state.power = "on"
             applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
             applied_brightness_step = self._resolve_applied_brightness_step_locked()
-        elif transition_seconds == 0:
+        elif pacing.snaps:
             # Dark, snapping: today's D7-then-D9 order, unchanged since #29.
             self._ensure_power_on_locked(writes)
             applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
@@ -568,31 +661,28 @@ class MoonHaloModel:
                 if last_level is not None:
                     self._state.last_level = last_level
                 self.last_writes = writes
-                self.last_transition = Transition(seconds=float(transition_seconds), steps=1)
+                self.last_transition = Transition(seconds=pacing.schedule(0)[1], steps=1)
                 self._save_state()
                 return self._status_locked()
 
         colour_delta = target_colortemp_step - applied_colortemp_step
         brightness_delta = target_brightness_step - applied_brightness_step
         steps_delta = max(abs(colour_delta), abs(brightness_delta))
-
-        step_count = 1
-        if transition_seconds != 0 and steps_delta > 0:
-            step_count = max(1, min(steps_delta, int(transition_seconds // WRITE_FLOOR_SECONDS)))
+        step_count, planned_seconds = pacing.schedule(steps_delta)
 
         if step_count <= 1:
             return self._write_move_now_locked(
                 target_colortemp_step,
                 target_brightness_step,
                 writes,
-                transition_seconds,
+                planned_seconds,
                 last_level,
             )
 
         now = time.monotonic()
         plan_steps = [
             (
-                now + (k * transition_seconds / (step_count - 1)),
+                now + (k * planned_seconds / (step_count - 1)),
                 round(applied_colortemp_step + colour_delta * (k + 1) / step_count),
                 round(applied_brightness_step + brightness_delta * (k + 1) / step_count),
             )
@@ -601,7 +691,7 @@ class MoonHaloModel:
         self._ramp_plan = _RampPlan(
             target_colortemp_step=target_colortemp_step,
             target_brightness_step=target_brightness_step,
-            transition_seconds=transition_seconds,
+            planned_seconds=planned_seconds,
             steps=plan_steps,
             start_time=now,
         )
@@ -612,7 +702,7 @@ class MoonHaloModel:
         if last_level is not None:
             self._state.last_level = last_level
         self.last_writes = writes
-        self.last_transition = Transition(seconds=float(transition_seconds), steps=step_count)
+        self.last_transition = Transition(seconds=planned_seconds, steps=step_count)
         self._save_state()
         self._condition.notify_all()
         return self._status_locked()
@@ -621,35 +711,32 @@ class MoonHaloModel:
         self,
         applied_colortemp_step: int,
         applied_brightness_step: int,
-        transition_seconds: float,
+        pacing: Pacing,
     ) -> None:
         """Plan the brightness-down Ramp a lit `turn_off` makes with a
-        non-zero `transition`: from `applied_brightness_step` down to
-        step 1, holding `applied_colortemp_step`, ending in a D7 off write
-        the worker performs as the plan's true final write
+        non-zero `pacing`: from `applied_brightness_step` down to step 1,
+        holding `applied_colortemp_step`, ending in a D7 off write the
+        worker performs as the plan's true final write
         (`power_off_after=True`; see `_RampPlan`/`_worker_loop`). Uses the
-        same step-count rule as `_plan_move_locked` -- the brightness
-        delta, capped by `transition_seconds // WRITE_FLOOR_SECONDS` -- but,
-        unlike that planner, this is never collapsed to a synchronous
-        write: an Applied step of 1 plans zero D9 writes (the worker's
-        only action is the D7 off write, performed at once), and a delta
-        of one hardware step is a one-write plan followed by D7 off, not a
-        synchronous write. Caller holds `self._lock` and is responsible
-        for `self._state.power` and persisting it.
+        same `Pacing.schedule` rule as `_plan_move_locked` on the
+        brightness delta but, unlike that planner, this is never collapsed
+        to a synchronous write: an Applied step of 1 plans zero D9 writes
+        (the worker's only action is the D7 off write, performed at once),
+        and a delta of one hardware step is a one-write plan followed by
+        D7 off, not a synchronous write. Caller holds `self._lock` and is
+        responsible for `self._state.power` and persisting it.
         """
-        delta = applied_brightness_step - 1
-        step_count = 0
-        if delta > 0:
-            step_count = max(1, min(delta, int(transition_seconds // WRITE_FLOOR_SECONDS)))
+        step_count, planned_seconds = pacing.schedule(applied_brightness_step - 1)
 
         now = time.monotonic()
         if step_count == 0:
             plan_steps: list[tuple[float, int, int]] = []
         else:
+            delta = applied_brightness_step - 1
             denom = max(step_count - 1, 1)
             plan_steps = [
                 (
-                    now + (k * transition_seconds / denom),
+                    now + (k * planned_seconds / denom),
                     applied_colortemp_step,
                     applied_brightness_step - round(delta * (k + 1) / step_count),
                 )
@@ -659,13 +746,13 @@ class MoonHaloModel:
         self._ramp_plan = _RampPlan(
             target_colortemp_step=applied_colortemp_step,
             target_brightness_step=1,
-            transition_seconds=transition_seconds,
+            planned_seconds=planned_seconds,
             steps=plan_steps,
             start_time=now,
             power_off_after=True,
         )
         self._ensure_worker_started_locked()
-        self.last_transition = Transition(seconds=float(transition_seconds), steps=step_count)
+        self.last_transition = Transition(seconds=planned_seconds, steps=step_count)
 
     def _cancel_ramp_locked(self) -> None:
         """Clear any in-flight Ramp plan, logging the writes it got to make.
@@ -898,22 +985,27 @@ class MoonHaloModel:
         self._applied_colortemp_step = None
 
     def set_colortemp(
-        self, step: int, stage: bool = False, transition: Optional[float] = None
+        self,
+        step: int,
+        stage: bool = False,
+        transition: Optional[float] = None,
+        sweep: Optional[float] = None,
     ) -> dict[str, Any]:
-        """Set MoonHalo colour temperature to hardware step `step` (1-7)
-        over `transition` seconds (default `config.transition_seconds`).
+        """Set MoonHalo colour temperature to hardware step `step` (1-7),
+        paced by `transition` (total time), else `sweep`, else the
+        configured Sweep time (`_resolve_pacing`).
 
         If `stage` is true, only the remembered `colortemp_step` changes:
-        no DDC writes happen, the halo's power is untouched, `transition`
+        no DDC writes happen, the halo's power is untouched, the pacing
         is ignored, and a running Ramp is left alone entirely; the reply's
         Transition reports zero steps since nothing was written. Otherwise
         this goes through the shared planner (see `_plan_move_locked`),
         aimed at `step` and the brightness step to keep (see
         `_resolve_brightness_step_locked`) -- so a Ramp already in flight
         is retargeted into a combined move rather than restarted, an
-        identical Target leaves it alone, and an explicit `transition` of
-        0 snaps. If `last_level` was not yet known, it is derived from the
-        brightness step kept.
+        identical Target leaves it alone, and a pacing of 0 snaps. If
+        `last_level` was not yet known, it is derived from the brightness
+        step kept.
         """
         with self._lock:
             if stage:
@@ -923,8 +1015,7 @@ class MoonHaloModel:
                 self._save_state()
                 return self._status_locked()
 
-            resolved_transition = self._resolve_transition(transition)
-            return self._plan_move_locked(step, None, resolved_transition)
+            return self._plan_move_locked(step, None, self._resolve_pacing(transition, sweep))
 
     def _ensure_power_on_locked(self, writes: list[tuple[int, int]]) -> None:
         """Write D7 On and remember power "on" if not already on, appending

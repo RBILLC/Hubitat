@@ -7,7 +7,8 @@
  * on the Windows PC the monitor is attached to, using its JSON contract:
  * /moonhalo/on[?level=1-100], /moonhalo/off, /moonhalo/brightness/<0-100>
  * (0 = off), /moonhalo/colortemp/<value>[?stage=1] (1-7 is a hardware step,
- * 1000 or more is Kelvin) and /moonhalo/status. Each reply is
+ * 1000 or more is Kelvin) and /moonhalo/status; the first four also take
+ * transition=<seconds> or sweep=<seconds>. Each reply is
  * {"ok": true, "state": {power, level, brightnessStep, colorTemperature,
  * colorTempStep, monitor}} or {"ok": false, "error": "..."}.
  *
@@ -21,8 +22,8 @@
  *   from the state carried in its reply. Nothing is assumed optimistically.
  * - The Transition (setLevel's rate, setColorTemperature's tt) is forwarded
  *   to the Bridge as the transition query parameter, in seconds: 0 makes the
- *   change immediate; a missing or non-numeric value is omitted so the
- *   Bridge's configured default Transition applies.
+ *   change immediate. Without a rate, the Default transition preference goes
+ *   as the sweep query parameter; blank leaves the Bridge default in place.
  * - on() only asks the Bridge to turn on; the Bridge restores the level it
  *   remembers (or its configured default). The Driver keeps no copy of that
  *   level: Hubitat's Google Home app sends setLevel and then on() for one
@@ -41,10 +42,12 @@
  *   timeout. Changing the typed IP or port forgets the announced address
  *   until the next announcement; saving other preferences keeps it.
  *
- * Version: 0.0.9 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.10 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-08 0.0.10 - Default transition (seconds) preference, sent as the sweep query parameter
+ *                     when a command carries no rate (issue #37)
  * 2026-09-08 0.0.9 - setLevel's rate and setColorTemperature's tt are forwarded to the Bridge as
  *                    the transition query parameter (seconds; 0 snaps immediately) instead of being
  *                    ignored; a non-numeric or missing value still leaves the Bridge default in
@@ -104,6 +107,7 @@ metadata {
         input name: "ctMinKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
         input name: "ctMaxKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
         input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Store a colour temperature while the MoonHalo stays off", defaultValue: false
+        input name: "defaultTransitionSec", type: "decimal", title: "Default transition (seconds)", description: "Time a full brightness sweep takes when a command carries no rate (0-60; 0 snaps); blank uses the Bridge default", range: "0..60"
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
@@ -237,17 +241,15 @@ private Integer announceTimeout() {
 // on() for a single slider move, and replayed the old level over the new.
 void on() {
     logDebug "on()"
-    sendBridge("/moonhalo/on", [command: "on"])
+    sendBridge("/moonhalo/on" + paceQuery(null), [command: "on"])
 }
 
 void off() {
     logDebug "off()"
-    sendBridge("/moonhalo/off", [command: "off"])
+    sendBridge("/moonhalo/off" + paceQuery(null), [command: "off"])
 }
 
-// rate, the Transition in seconds, is forwarded verbatim as the transition
-// query parameter, including 0; a null or non-numeric rate is omitted and
-// the Bridge's configured default Transition applies.
+// rate is forwarded as the transition query parameter; see paceQuery.
 void setLevel(value, rate = null) {
     logDebug "setLevel(${value}, ${rate})"
     if (value == null) return
@@ -258,18 +260,15 @@ void setLevel(value, rate = null) {
     }
     if (level == 0) {
         // Level 0 is off, but its rate still travels: the Bridge dims out over it (0 snaps).
-        sendBridge("/moonhalo/off" + transitionQuery(rate), [command: "off"])
+        sendBridge("/moonhalo/off" + paceQuery(rate), [command: "off"])
         return
     }
-    sendBridge("/moonhalo/brightness/${level}" + transitionQuery(rate), [command: "setLevel", level: level])
+    sendBridge("/moonhalo/brightness/${level}" + paceQuery(rate), [command: "setLevel", level: level])
 }
 
-// tt, the Transition in seconds, is forwarded the same way as setLevel's
-// rate, on the colour request and, when a level is given, on the brightness
-// request that precedes it. When a level is given the brightness request
-// goes first and the colour temperature request is sent from its reply, so
-// the Bridge sees them in order and the MoonHalo is on (and pre-staging does
-// not apply) by the time the colour arrives.
+// tt is forwarded like setLevel's rate, on both requests when a level is
+// given: brightness goes first and the colour request is sent from its
+// reply, so the MoonHalo is on (and pre-staging does not apply) by then.
 void setColorTemperature(value, level = null, tt = null) {
     logDebug "setColorTemperature(${value}, ${level}, ${tt})"
     if (value == null) return
@@ -288,11 +287,11 @@ void setColorTemperature(value, level = null, tt = null) {
     String ctPath = "/moonhalo/colortemp/${kelvin}"
     Integer lvl = (level == null) ? null : limitIntegerRange(level, 0, 100)
     if (lvl != null && lvl > 0) {
-        sendBridge("/moonhalo/brightness/${lvl}" + transitionQuery(tt), [command: "setColorTemperature", level: lvl, followUp: ctPath + transitionQuery(tt)])
+        sendBridge("/moonhalo/brightness/${lvl}" + paceQuery(tt), [command: "setColorTemperature", level: lvl, followUp: ctPath + paceQuery(tt)])
         return
     }
     String stage = stageQuery()
-    sendBridge(ctPath + stage + transitionQuery(tt, stage != ""), [command: "setColorTemperature", colorTemperature: kelvin])
+    sendBridge(ctPath + stage + paceQuery(tt, stage != ""), [command: "setColorTemperature", colorTemperature: kelvin])
 }
 
 void setColorTempStep(step) {
@@ -379,20 +378,36 @@ private String stageQuery() {
     return stage ? "?stage=1" : ""
 }
 
-// "?transition=<value>" (or "&transition=<value>" when queryStarted is true,
-// for a path that already carries a "?stage=1"), forwarding value verbatim
-// so 0, 3 and 2.5 all pass through unchanged. Empty when value is null or
-// not a decimal number (a Hubitat command argument may arrive as a String,
-// Integer, BigDecimal or null), in which case the Bridge's configured
-// default Transition applies.
-private String transitionQuery(Object value, Boolean queryStarted = false) {
-    if (value == null) return ""
-    String text = "${value}".toString().trim()
-    if (!text.isNumber()) {
-        logDebug "transition '${value}' is not a number; omitted, the Bridge default Transition applies"
-        return ""
+// "?transition=<value>" when value (a rate or tt) is a number, else
+// "?sweep=<preference>" when Default transition is set, else "".
+// queryStarted: the path already carries "?stage=1", so use "&".
+private String paceQuery(Object value, Boolean queryStarted = false) {
+    String separator = queryStarted ? "&" : "?"
+    if (value != null) {
+        String text = "${value}".toString().trim()
+        if (text.isNumber()) return separator + "transition=${text}"
+        logDebug "transition '${value}' is not a number; omitted"
     }
-    return (queryStarted ? "&" : "?") + "transition=${text}"
+    String sweep = sweepSeconds()
+    return (sweep == null) ? "" : separator + "sweep=${sweep}"
+}
+
+// The Default transition preference as text, or null if blank, not a number, or outside 0-60.
+private String sweepSeconds() {
+    Object value = settings["defaultTransitionSec"]
+    if (value == null) return null
+    String text = "${value}".toString().trim()
+    if (text == "") return null
+    if (!text.isNumber()) {
+        logDebug "Default transition '${value}' is not a number; ignored, the Bridge default applies"
+        return null
+    }
+    BigDecimal seconds = text.toBigDecimal()
+    if (seconds < 0 || seconds > 60) {
+        logDebug "Default transition ${text} is outside 0-60; ignored, the Bridge default applies"
+        return null
+    }
+    return text
 }
 
 // ---------------------------------------------------------------------------

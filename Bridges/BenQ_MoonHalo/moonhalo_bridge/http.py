@@ -43,8 +43,9 @@ def _log_move_request(
 ) -> None:
     """The on, off, brightness and colortemp endpoints' success log line:
     the immediate writes made (a Ramp's own writes are not among them) plus
-    the Transition applied, so a Ramp is traceable even though most of its
-    writes happen later on the worker thread. For on/brightness/colortemp
+    the Transition applied -- its planned duration in seconds and its write
+    count -- so a Ramp is traceable even though most of its writes happen
+    later on the worker thread. For on/brightness/colortemp
     with a non-zero Transition while the halo was dark (issue #35), both
     immediate writes -- the relight D9 and the D7 on -- show up in
     `model.last_writes`, in that order. `target` is the Level (on,
@@ -76,24 +77,39 @@ def _parse_level(raw: Optional[str]) -> Optional[int]:
     return level
 
 
-def _parse_transition(raw: Optional[str]) -> Optional[float]:
-    """Validate the optional `transition` query on `/moonhalo/on`,
-    `/moonhalo/off`, `/moonhalo/brightness/<value>` and
+def _parse_seconds_query(name: str, raw: Optional[str]) -> Optional[float]:
+    """Validate an optional seconds query (`transition` or `sweep`) on
+    `/moonhalo/on`, `/moonhalo/off`, `/moonhalo/brightness/<value>` and
     `/moonhalo/colortemp/<value>`: decimal seconds 0-60, or None when
-    absent (the caller then falls back to `config.transition_seconds`).
-    Raises ValueError, with a message fit for a 400 body, otherwise.
+    absent. Raises ValueError, with a message fit for a 400 body naming
+    `name`, otherwise.
     """
     if raw is None:
         return None
     try:
-        transition = float(raw)
+        seconds = float(raw)
     except ValueError:
-        raise ValueError(
-            f"transition must be a number of seconds 0-60, got {raw!r}"
-        ) from None
-    if not 0 <= transition <= 60:
-        raise ValueError(f"transition must be a number of seconds 0-60, got {raw!r}")
-    return transition
+        raise ValueError(f"{name} must be a number of seconds 0-60, got {raw!r}") from None
+    if not 0 <= seconds <= 60:
+        raise ValueError(f"{name} must be a number of seconds 0-60, got {raw!r}")
+    return seconds
+
+
+def _parse_transition(raw: Optional[str]) -> Optional[float]:
+    """The optional `transition` query: the total time for this move,
+    intermediates dropped to fit, 0 snaps (see `_parse_seconds_query`).
+    None when absent: the model then falls back to `sweep`, then to
+    `config.transition_seconds`."""
+    return _parse_seconds_query("transition", raw)
+
+
+def _parse_sweep(raw: Optional[str]) -> Optional[float]:
+    """The optional `sweep` query (issue #37): a Sweep time for this
+    command -- what a full nine-step brightness move takes -- overriding
+    `config.transition_seconds`; every step is written at that pace and 0
+    snaps (see `_parse_seconds_query`). Ignored when `transition` is
+    also present. None when absent."""
+    return _parse_seconds_query("sweep", raw)
 
 
 def _parse_brightness(raw: str) -> int:
@@ -161,15 +177,19 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             return jsonify({"ok": False, "error": "forbidden"}), 403
         return None
 
-    def transition_query(endpoint: str):
-        """The request's optional `transition` query, parsed, with a 400
-        response already logged and built when it is invalid: returns
-        `(seconds or None, None)` or `(None, response)`."""
+    def pacing_queries(endpoint: str):
+        """The request's optional `transition` and `sweep` queries,
+        parsed, with a 400 response already logged and built when either
+        is invalid: returns `(transition or None, sweep or None, None)`
+        or `(None, None, response)`. Precedence between the two is the
+        model's (`transition` wins; see `MoonHaloModel._resolve_pacing`)."""
         try:
-            return _parse_transition(request.args.get("transition")), None
+            transition = _parse_transition(request.args.get("transition"))
+            sweep = _parse_sweep(request.args.get("sweep"))
         except ValueError as error:
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
-            return None, (jsonify({"ok": False, "error": str(error)}), 400)
+            return None, None, (jsonify({"ok": False, "error": str(error)}), 400)
+        return transition, sweep, None
 
     @app.get("/health")
     def health():
@@ -185,12 +205,12 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        transition, rejection = transition_query(endpoint)
+        transition, sweep, rejection = pacing_queries(endpoint)
         if rejection is not None:
             return rejection
 
         try:
-            state = model.turn_on(level, transition)
+            state = model.turn_on(level, transition, sweep)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
@@ -204,12 +224,12 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     @app.get("/moonhalo/off")
     def moonhalo_off():
         endpoint = "/moonhalo/off"
-        transition, rejection = transition_query(endpoint)
+        transition, sweep, rejection = pacing_queries(endpoint)
         if rejection is not None:
             return rejection
 
         try:
-            state = model.turn_off(transition)
+            state = model.turn_off(transition, sweep)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
@@ -229,12 +249,12 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        transition, rejection = transition_query(endpoint)
+        transition, sweep, rejection = pacing_queries(endpoint)
         if rejection is not None:
             return rejection
 
         try:
-            state = model.set_level(level, transition)
+            state = model.set_level(level, transition, sweep)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500
@@ -254,13 +274,13 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             _log_request(logger, endpoint, NO_WRITES, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 400
 
-        transition, rejection = transition_query(endpoint)
+        transition, sweep, rejection = pacing_queries(endpoint)
         if rejection is not None:
             return rejection
 
         stage = request.args.get("stage") == "1"
         try:
-            state = model.set_colortemp(step, stage=stage, transition=transition)
+            state = model.set_colortemp(step, stage=stage, transition=transition, sweep=sweep)
         except DdcError as error:
             _log_request(logger, endpoint, model.last_writes, f"error:{error}")
             return jsonify({"ok": False, "error": str(error)}), 500

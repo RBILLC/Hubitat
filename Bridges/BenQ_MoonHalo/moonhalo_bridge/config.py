@@ -45,8 +45,11 @@ DEFAULTS: dict[str, Any] = {
     "maker_api_token": None,
     "announce_seconds": 60,
     "announce_enabled": None,
-    # Brightness Transition (moonhalo_bridge.model's Ramp): default seconds spent
-    # moving from the Applied brightness step to the Target one.
+    # Sweep time (moonhalo_bridge.model's Pacing, issue #37): the seconds a
+    # full nine-step brightness move takes when a command carries no
+    # `transition` or `sweep`; every move runs at that pace (a ninth of it
+    # between writes, floored at the write pace), so shorter moves finish
+    # sooner. 0 makes every default-paced change immediate.
     "transition_seconds": 0.6,
 }
 

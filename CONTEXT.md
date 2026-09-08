@@ -46,7 +46,11 @@ _Avoid_: fade, transition time, tt, duration (when meaning the concept)
 
 **Ramp**:
 The sequence of hardware-step writes that realises a Transition, one write per hardware step moved, evenly spaced over the Transition.
-_Avoid_: animation, sweep, interpolation
+_Avoid_: animation, interpolation
+
+**Sweep time**:
+The Transition a full nine-step brightness move takes. The Bridge's default pace and the Driver's Default transition preference are Sweep times: every move keeps the same interval between writes, a ninth of the Sweep time, so a short move finishes sooner. A Transition passed with a command is instead the total time for that move.
+_Avoid_: default transition (when meaning the concept), rate, speed
 
 **Target state**:
 The MoonHalo setting most recently commanded. What the Bridge reports to the Hub, whether or not the Ramp has reached it.
