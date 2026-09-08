@@ -544,21 +544,25 @@ class TestMoonHaloBrightnessTransition(HttpTestCase):
         self.assertEqual(response.get_json()["transition"], {"seconds": 0.6, "steps": 1})
         self.assertEqual(len(self.port.writes), 1)
 
-    def test_configured_default_transition_applies_when_query_absent(self):
+    def test_configured_default_is_a_sweep_time_that_drops_no_step(self):
+        # Issue #37: with no query the configured `transition_seconds` is a
+        # Sweep time, not a total: 0.3 s gives the 60 ms floor interval, and
+        # every one of the nine steps is written (0.48 s), where the old
+        # total-time rule fitted only five.
         port = FakeDdcPort()
         config = make_config(
             self.tmp_dir, transition_seconds=0.3, state_file=self.tmp_dir / "default03.json"
         )
         model = MoonHaloModel(port, config)
         client = create_app(model, config).test_client()
-        client.get("/moonhalo/brightness/10?transition=0")  # step 1
+        client.get("/moonhalo/brightness/1?transition=0")  # step 1
         port.writes.clear()
 
         response = client.get("/moonhalo/brightness/100")  # step 10, no query
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["transition"]["steps"], 5)
-        writes = _wait_for_writes(port, 5)
-        self.assertEqual(len(writes), 5)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.48, "steps": 9})
+        writes = _wait_for_writes(port, 9)
+        self.assertEqual(len(writes), 9)
 
     def test_configured_default_transition_zero_is_synchronous(self):
         port = FakeDdcPort()
@@ -735,6 +739,235 @@ class TestMoonHaloBrightnessTransition(HttpTestCase):
                 self.assertFalse(body["ok"])
                 self.assertIn("transition", body["error"])
                 self.assertEqual(self.port.writes, [])
+
+
+class TestSweepPacing(HttpTestCase):
+    """Issue #37: every default-paced move runs at one pace. The configured
+    `transition_seconds` (or a `sweep` query) is a Sweep time -- what a full
+    nine-step brightness move takes -- so the interval between writes is
+    `max(sweep / 9, WRITE_FLOOR_SECONDS)`, no step is ever dropped, and an
+    n-step move ends after (n - 1) intervals. An explicit `transition`
+    keeps its total-time meaning and wins over `sweep`.
+    """
+
+    def _client_with_sweep(self, sweep: float):
+        port = FakeDdcPort()
+        config = make_config(
+            self.tmp_dir, transition_seconds=sweep, state_file=self.tmp_dir / f"sweep{sweep}.json"
+        )
+        model = MoonHaloModel(port, config)
+        return port, create_app(model, config).test_client()
+
+    def _start_at_level(self, client, port, level: int) -> None:
+        response = client.get(f"/moonhalo/brightness/{level}?transition=0")
+        self.assertEqual(response.status_code, 200)
+        port.writes.clear()
+
+    def test_sweep_below_the_floor_writes_all_nine_steps_at_the_floor(self):
+        port, client = self._client_with_sweep(0.4)
+        self._start_at_level(client, port, 1)  # step 1
+        colour_step = self.config.default_colortemp_step
+
+        start = time.monotonic()
+        response = client.get("/moonhalo/brightness/100")  # step 10
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.48, "steps": 9})
+
+        writes = _wait_for_writes(port, 9)
+        elapsed = time.monotonic() - start
+        self.assertEqual(writes, [(VCP_D9, pack_d9(colour_step, step)) for step in range(2, 11)])
+        self.assertGreaterEqual(elapsed, 0.48)
+        self.assertLess(elapsed, 1.0)
+
+    def test_two_step_move_ends_after_one_interval(self):
+        port, client = self._client_with_sweep(0.4)
+        self._start_at_level(client, port, 50)  # step 5
+        colour_step = self.config.default_colortemp_step
+
+        start = time.monotonic()
+        response = client.get("/moonhalo/brightness/23")  # step 3
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.06, "steps": 2})
+
+        writes = _wait_for_writes(port, 2)
+        elapsed = time.monotonic() - start
+        self.assertEqual(writes, [(VCP_D9, pack_d9(colour_step, step)) for step in (4, 3)])
+        self.assertLess(elapsed, 0.4)
+
+    def test_sweep_0_9_paces_writes_100ms_apart(self):
+        port, client = self._client_with_sweep(0.9)
+        self._start_at_level(client, port, 1)  # step 1
+
+        start = time.monotonic()
+        response = client.get("/moonhalo/brightness/100")  # step 10
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.8, "steps": 9})
+
+        writes = _wait_for_writes(port, 9)
+        elapsed = time.monotonic() - start
+        self.assertEqual(len(writes), 9)
+        self.assertGreaterEqual(elapsed, 0.8)
+        self.assertLess(elapsed, 1.4)
+
+    def test_sweep_query_overrides_the_configured_sweep_time(self):
+        self._start_at_level(self.client, self.port, 1)  # config sweep is 0.6
+        response = self.client.get("/moonhalo/brightness/100?sweep=0.9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.8, "steps": 9})
+        _wait_for_writes(self.port, 9, deadline=1.5)
+
+    def test_sweep_query_zero_snaps(self):
+        self._start_at_level(self.client, self.port, 1)
+        response = self.client.get("/moonhalo/brightness/100?sweep=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 1})
+        self.assertEqual(len(self.port.writes), 1)
+
+    def test_transition_wins_over_sweep_when_both_are_present(self):
+        self._start_at_level(self.client, self.port, 1)
+        response = self.client.get("/moonhalo/brightness/100?transition=0.2&sweep=0.9")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.2, "steps": 3})
+        _wait_for_writes(self.port, 3)
+
+    def test_explicit_transition_still_drops_steps_and_lands_on_time(self):
+        port, client = self._client_with_sweep(0.9)
+        self._start_at_level(client, port, 1)
+        start = time.monotonic()
+        response = client.get("/moonhalo/brightness/100?transition=0.2")
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.2, "steps": 3})
+        writes = _wait_for_writes(port, 3)
+        elapsed = time.monotonic() - start
+        self.assertEqual(len(writes), 3)
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertLess(elapsed, 0.6)
+
+    def test_invalid_sweep_values_rejected_on_every_endpoint_with_no_write(self):
+        self._start_at_level(self.client, self.port, 50)
+        for path in ("/moonhalo/on", "/moonhalo/off", "/moonhalo/brightness/100", "/moonhalo/colortemp/7"):
+            for value in ("abc", "-1", "61"):
+                with self.subTest(path=path, value=value):
+                    response = self.client.get(f"{path}?sweep={value}")
+                    self.assertEqual(response.status_code, 400)
+                    body = response.get_json()
+                    self.assertFalse(body["ok"])
+                    self.assertIn("sweep", body["error"])
+                    self.assertEqual(self.port.writes, [])
+
+    def test_off_dims_out_at_the_sweep_interval(self):
+        port, client = self._client_with_sweep(0.4)
+        self._start_at_level(client, port, 100)  # step 10
+        colour_step = self.config.default_colortemp_step
+
+        start = time.monotonic()
+        response = client.get("/moonhalo/off")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.48, "steps": 9})
+
+        writes = _wait_for_writes(port, 10)
+        elapsed = time.monotonic() - start
+        self.assertEqual(
+            writes,
+            [(VCP_D9, pack_d9(colour_step, step)) for step in range(9, 0, -1)]
+            + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+        self.assertGreaterEqual(elapsed, 0.48)
+        self.assertLess(elapsed, 1.0)
+
+    def test_off_from_step_two_is_one_write_then_d7_off_at_once(self):
+        port, client = self._client_with_sweep(0.4)
+        self._start_at_level(client, port, 12)  # step 2
+        colour_step = self.config.default_colortemp_step
+        response = client.get("/moonhalo/off")
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 1})
+        writes = _wait_for_writes(port, 2)
+        self.assertEqual(writes, [(VCP_D9, pack_d9(colour_step, 1)), (VCP_POWER, POWER_OFF_VALUE)])
+
+    def test_on_rises_at_the_sweep_interval(self):
+        port, client = self._client_with_sweep(0.4)
+        client.get("/moonhalo/brightness/100?transition=0")  # step 10
+        client.get("/moonhalo/colortemp/4?transition=0")
+        client.get("/moonhalo/off?transition=0")
+        port.writes.clear()
+
+        start = time.monotonic()
+        response = client.get("/moonhalo/on")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.48, "steps": 9})
+        self.assertEqual(port.writes[:2], [(VCP_D9, pack_d9(4, 1)), (VCP_POWER, POWER_ON_VALUE)])
+
+        writes = _wait_for_writes(port, 11)
+        elapsed = time.monotonic() - start
+        self.assertEqual(writes[2:], [(VCP_D9, pack_d9(4, step)) for step in range(2, 11)])
+        self.assertGreaterEqual(elapsed, 0.48)
+        self.assertLess(elapsed, 1.0)
+
+    def test_on_to_the_lowest_level_from_dark_is_the_relight_write_alone(self):
+        # The relight D9 write at step 1 already is the target: one step,
+        # no interval, so a Sweep-paced reply reports 0.0 seconds.
+        port, client = self._client_with_sweep(0.4)
+        client.get("/moonhalo/colortemp/4?transition=0")
+        client.get("/moonhalo/off?transition=0")
+        port.writes.clear()
+
+        response = client.get("/moonhalo/on?level=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 1})
+        self.assertEqual(port.writes, [(VCP_D9, pack_d9(4, 1)), (VCP_POWER, POWER_ON_VALUE)])
+
+    def test_on_and_off_accept_the_sweep_query(self):
+        self._start_at_level(self.client, self.port, 100)
+        response = self.client.get("/moonhalo/off?sweep=0.9")
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.8, "steps": 9})
+        _wait_for_writes(self.port, 10, deadline=1.5)
+        self.port.writes.clear()
+
+        response = self.client.get("/moonhalo/on?sweep=0.9")
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.8, "steps": 9})
+        _wait_for_writes(self.port, 11, deadline=1.5)
+
+    def test_colortemp_move_runs_at_the_sweep_interval(self):
+        port, client = self._client_with_sweep(0.4)
+        client.get("/moonhalo/brightness/50?transition=0")  # step 5
+        client.get("/moonhalo/colortemp/1?transition=0")
+        port.writes.clear()
+
+        response = client.get("/moonhalo/colortemp/7")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.3, "steps": 6})
+        writes = _wait_for_writes(port, 6)
+        self.assertEqual(writes, [(VCP_D9, pack_d9(c, 5)) for c in range(2, 8)])
+
+    def test_retarget_mid_ramp_keeps_the_pace(self):
+        # sweep=9 gives a 1 s interval: the first write (step 2) lands at
+        # once and step 3 is due a second later, so a retarget at 0.3 s
+        # starts from Applied step 2 -- a three-step move to step 5, still
+        # one write per second, planned as two intervals.
+        self._start_at_level(self.client, self.port, 1)
+        self.client.get("/moonhalo/brightness/100?sweep=9")
+        _wait_for_writes(self.port, 1)
+        time.sleep(0.3)
+
+        response = self.client.get("/moonhalo/brightness/50?sweep=9")  # step 5
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 2.0, "steps": 3})
+        colour_step = self.config.default_colortemp_step
+        writes = _wait_for_writes(self.port, 2)  # the retargeted Ramp's first write, step 3
+        self.assertEqual(writes[:2], [(VCP_D9, pack_d9(colour_step, 2)), (VCP_D9, pack_d9(colour_step, 3))])
+
+        self.client.get("/moonhalo/brightness/50?transition=0")  # cancel the slow ramp
+
+    def test_same_target_mid_ramp_leaves_it_alone(self):
+        self._start_at_level(self.client, self.port, 1)
+        first = self.client.get("/moonhalo/brightness/100?sweep=9").get_json()["transition"]
+        self.assertEqual(first, {"seconds": 8.0, "steps": 9})
+        _wait_for_writes(self.port, 1)
+
+        second = self.client.get("/moonhalo/brightness/100?sweep=9").get_json()["transition"]
+        self.assertEqual(second, first)
+        self.assertEqual(len(self.port.writes), 1)
+
+        self.client.get("/moonhalo/brightness/100?transition=0")  # cancel the slow ramp
 
 
 class TestRampWriteFailure(HttpTestCase):
@@ -916,6 +1149,18 @@ class TestBrightnessTransitionLogging(HttpTestCase):
         ramp_line = lines[-1]
         self.assertIn("target=100", ramp_line)
         self.assertIn("transition=0.6s", ramp_line)
+        self.assertIn("steps=9", ramp_line)
+
+        _wait_for_writes(self.port, 9, deadline=1.5)  # let the ramp settle
+
+    def test_sweep_paced_log_line_shows_the_planned_duration_and_write_count(self):
+        self.client.get("/moonhalo/brightness/1?transition=0")  # step 1
+        response = self.client.get("/moonhalo/brightness/100?sweep=0.4")  # step 10
+        self.assertEqual(response.status_code, 200)
+
+        log_text = self.config.log_file.read_text(encoding="utf-8")
+        ramp_line = [line for line in log_text.splitlines() if "/moonhalo/brightness" in line][-1]
+        self.assertIn("transition=0.48s", ramp_line)
         self.assertIn("steps=9", ramp_line)
 
         _wait_for_writes(self.port, 9, deadline=1.5)  # let the ramp settle

@@ -17,9 +17,12 @@ from moonhalo_bridge.ddc import DdcError, FakeDdcPort
 from moonhalo_bridge.model import (
     POWER_OFF_VALUE,
     POWER_ON_VALUE,
+    SWEEP_STEPS,
     VCP_D9,
     VCP_POWER,
+    WRITE_FLOOR_SECONDS,
     MoonHaloModel,
+    Pacing,
     brightness_step_to_level,
     colortemp_step_to_kelvin,
     kelvin_to_colortemp_step,
@@ -167,6 +170,46 @@ class TestBrightnessScaling(unittest.TestCase):
         self.assertEqual(pack_d9(4, 5), 0x0405)
         self.assertEqual(pack_d9(1, 1), 0x0101)
         self.assertEqual(pack_d9(7, 10), 0x070A)
+
+
+class TestPacingSchedule(unittest.TestCase):
+    """Issue #37: how a move of n hardware steps is timed. A Sweep time
+    (the configured default, or a `sweep` query) fixes the interval between
+    writes at a ninth of itself, floored at the write floor, and never
+    drops a step, so a move takes (n - 1) intervals; an explicit
+    `transition` is the total time for this move, intermediates dropped to
+    fit, as before. Zero snaps either way."""
+
+    def test_nine_steps_span_a_full_brightness_move(self):
+        self.assertEqual(SWEEP_STEPS, 9)
+
+    def test_sweep_interval_is_a_ninth_of_the_sweep_time_floored_at_the_write_floor(self):
+        self.assertAlmostEqual(Pacing.sweep(0.9).interval, 0.1)
+        self.assertAlmostEqual(Pacing.sweep(0.4).interval, WRITE_FLOOR_SECONDS)
+        self.assertAlmostEqual(Pacing.sweep(0.6).interval, WRITE_FLOOR_SECONDS + 0.2 / 30)
+
+    def test_sweep_paced_move_never_drops_a_step_and_takes_n_minus_1_intervals(self):
+        self.assertEqual(Pacing.sweep(0.4).schedule(9), (9, 0.48))
+        self.assertEqual(Pacing.sweep(0.9).schedule(9), (9, 0.8))
+        self.assertEqual(Pacing.sweep(0.4).schedule(2), (2, 0.06))
+        self.assertEqual(Pacing.sweep(0.9).schedule(6), (6, 0.5))
+
+    def test_sweep_paced_single_step_or_no_move_is_immediate(self):
+        self.assertEqual(Pacing.sweep(0.6).schedule(1), (1, 0.0))
+        self.assertEqual(Pacing.sweep(0.6).schedule(0), (0, 0.0))
+
+    def test_sweep_zero_snaps(self):
+        self.assertTrue(Pacing.sweep(0).snaps)
+        self.assertFalse(Pacing.sweep(0.4).snaps)
+        self.assertEqual(Pacing.sweep(0).schedule(9), (1, 0.0))
+
+    def test_explicit_transition_is_the_total_time_and_drops_steps_to_fit(self):
+        self.assertEqual(Pacing.total(0.6).schedule(9), (9, 0.6))
+        self.assertEqual(Pacing.total(0.2).schedule(9), (3, 0.2))
+        self.assertEqual(Pacing.total(0.6).schedule(1), (1, 0.6))
+        self.assertEqual(Pacing.total(0.6).schedule(0), (0, 0.6))
+        self.assertTrue(Pacing.total(0).snaps)
+        self.assertEqual(Pacing.total(0).schedule(9), (1, 0.0))
 
 
 class TestMoonHaloModelPower(unittest.TestCase):
