@@ -22,8 +22,9 @@
  *   from the state carried in its reply. Nothing is assumed optimistically.
  * - The Transition (setLevel's rate, setColorTemperature's tt) is forwarded
  *   to the Bridge as the transition query parameter, in seconds: 0 makes the
- *   change immediate. Without a rate, the Default transition preference goes
- *   as the sweep query parameter; blank leaves the Bridge default in place.
+ *   change immediate. Without a rate, the Default transition preference (ms,
+ *   default 300) goes as the sweep query parameter in seconds; blank leaves
+ *   the Bridge default in place.
  * - on() only asks the Bridge to turn on; the Bridge restores the level it
  *   remembers (or its configured default). The Driver keeps no copy of that
  *   level: Hubitat's Google Home app sends setLevel and then on() for one
@@ -42,10 +43,12 @@
  *   timeout. Changing the typed IP or port forgets the announced address
  *   until the next announcement; saving other preferences keeps it.
  *
- * Version: 0.0.10 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.11 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-08 0.0.11 - Default transition is whole milliseconds, default 300: the decimal input would
+ *                     not accept values under 1.0 on the device page (issue #37)
  * 2026-09-08 0.0.10 - Default transition (seconds) preference, sent as the sweep query parameter
  *                     when a command carries no rate (issue #37)
  * 2026-09-08 0.0.9 - setLevel's rate and setColorTemperature's tt are forwarded to the Bridge as
@@ -107,7 +110,7 @@ metadata {
         input name: "ctMinKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
         input name: "ctMaxKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
         input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Store a colour temperature while the MoonHalo stays off", defaultValue: false
-        input name: "defaultTransitionSec", type: "decimal", title: "Default transition (seconds)", description: "Time a full brightness sweep takes when a command carries no rate (0-60; 0 snaps); blank uses the Bridge default", range: "0..60"
+        input name: "defaultTransitionMs", type: "number", title: "Default transition (ms)", description: "Time a full brightness sweep takes when a command carries no rate, in whole milliseconds (0-60000; 0 snaps); blank uses the Bridge default", defaultValue: 300, range: "0..60000"
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
@@ -392,9 +395,10 @@ private String paceQuery(Object value, Boolean queryStarted = false) {
     return (sweep == null) ? "" : separator + "sweep=${sweep}"
 }
 
-// The Default transition preference as text, or null if blank, not a number, or outside 0-60.
+// The Default transition preference (ms) as seconds text for the sweep query, or null if
+// blank, not a number, or outside 0-60000.
 private String sweepSeconds() {
-    Object value = settings["defaultTransitionSec"]
+    Object value = settings["defaultTransitionMs"]
     if (value == null) return null
     String text = "${value}".toString().trim()
     if (text == "") return null
@@ -402,12 +406,12 @@ private String sweepSeconds() {
         logDebug "Default transition '${value}' is not a number; ignored, the Bridge default applies"
         return null
     }
-    BigDecimal seconds = text.toBigDecimal()
-    if (seconds < 0 || seconds > 60) {
-        logDebug "Default transition ${text} is outside 0-60; ignored, the Bridge default applies"
+    BigDecimal ms = text.toBigDecimal()
+    if (ms < 0 || ms > 60000) {
+        logDebug "Default transition ${text} ms is outside 0-60000; ignored, the Bridge default applies"
         return null
     }
-    return text
+    return (ms / 1000).stripTrailingZeros().toPlainString()
 }
 
 // ---------------------------------------------------------------------------

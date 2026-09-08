@@ -517,6 +517,22 @@ This example demonstrates (not documented, but shown in code):
 
 ---
 
+## 11. Decimal preference inputs with `range` reject values under 1 (observed 2026-09-08)
+
+**Documented:** `range` "is only available when the type is number or decimal", format `"low..high"`
+(Hubitat docs, Device Preferences / App Preferences pages, which render client-side and could not be
+fetched as text; wording as returned by search). Nothing in the docs or in the community thread
+[Input range question](https://community.hubitat.com/t/input-range-question/63468) (bravenel:
+non-contiguous ranges need a separate check) covers fractional values.
+
+**Observed on the hub:** a `type: "decimal"` input with `range: "0..60"` would not accept a value
+under 1.0 on the device page (Driver 0.0.10's Default transition preference; the user could not
+enter 0.3). Cause not confirmed (inference: the range check treats the bound as whole numbers).
+
+**Applied:** the preference became whole milliseconds on a `type: "number"` input with
+`range: "0..60000"` and `defaultValue: 300` (Driver 0.0.11), converted to seconds in the Driver
+before it is sent. Prefer integer inputs for any sub-unit preference.
+
 ## Open questions
 
 The following were not resolved by the sources listed at the top of this document and would need either a deeper crawl of docs2.hubitat.com, the Hubitat Community forum, or direct experimentation on a hub:

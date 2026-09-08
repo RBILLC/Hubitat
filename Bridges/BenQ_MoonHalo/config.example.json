@@ -23,5 +23,5 @@
   "maker_api_token": null,
   "announce_seconds": 60,
   "announce_enabled": null,
-  "transition_seconds": 0.6
+  "transition_seconds": 0.3
 }

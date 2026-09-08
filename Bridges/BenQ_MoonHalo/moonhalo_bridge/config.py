@@ -51,8 +51,8 @@ DEFAULTS: dict[str, Any] = {
     # between writes, floored at the write pace), so shorter moves finish
     # sooner. Below 0.54 s (nine writes at the floor) steps are dropped
     # evenly instead of slowing the writes. 0 makes every default-paced
-    # change immediate.
-    "transition_seconds": 0.6,
+    # change immediate. 0.3 (six writes) looked smoothest on the real halo.
+    "transition_seconds": 0.3,
 }
 
 
@@ -81,7 +81,7 @@ class Config:
     maker_api_token: Optional[str] = None
     announce_seconds: int = 60
     announce_enabled: bool = False
-    transition_seconds: float = 0.6
+    transition_seconds: float = 0.3
 
     @property
     def maker_configured(self) -> bool:

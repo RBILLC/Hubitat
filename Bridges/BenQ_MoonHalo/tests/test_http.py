@@ -839,7 +839,7 @@ class TestSweepPacing(HttpTestCase):
         self.assertLess(elapsed, 1.4)
 
     def test_sweep_query_overrides_the_configured_sweep_time(self):
-        self._start_at_level(self.client, self.port, 1)  # config sweep is 0.6
+        self._start_at_level(self.client, self.port, 1)  # config sweep is 0.3
         response = self.client.get("/moonhalo/brightness/100?sweep=0.9")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["transition"], {"seconds": 0.8, "steps": 9})
