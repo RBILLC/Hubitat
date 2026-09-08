@@ -45,6 +45,14 @@ DEFAULTS: dict[str, Any] = {
     "maker_api_token": None,
     "announce_seconds": 60,
     "announce_enabled": None,
+    # Sweep time (moonhalo_bridge.model's Pacing, issue #37): the seconds a
+    # full nine-step brightness move takes when a command carries no
+    # `transition` or `sweep`; every move runs at that pace (a ninth of it
+    # between writes, floored at the write pace), so shorter moves finish
+    # sooner. Below 0.54 s (nine writes at the floor) steps are dropped
+    # evenly instead of slowing the writes. 0 makes every default-paced
+    # change immediate. 0.3 (six writes) looked smoothest on the real halo.
+    "transition_seconds": 0.3,
 }
 
 
@@ -73,6 +81,7 @@ class Config:
     maker_api_token: Optional[str] = None
     announce_seconds: int = 60
     announce_enabled: bool = False
+    transition_seconds: float = 0.3
 
     @property
     def maker_configured(self) -> bool:
@@ -126,6 +135,16 @@ def load_config(path: Optional[Path] = None) -> Config:
     if announce_seconds < 1:
         raise ValueError(f"announce_seconds must be at least 1, got {announce_seconds}")
 
+    raw_transition_seconds = merged["transition_seconds"]
+    try:
+        transition_seconds = float(raw_transition_seconds)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"transition_seconds must be a number 0-60, got {raw_transition_seconds!r}"
+        ) from None
+    if not 0 <= transition_seconds <= 60:
+        raise ValueError(f"transition_seconds must be 0-60, got {transition_seconds}")
+
     return Config(
         host=merged["host"],
         port=int(merged["port"]),
@@ -147,4 +166,5 @@ def load_config(path: Optional[Path] = None) -> Config:
         maker_api_token=token,
         announce_seconds=announce_seconds,
         announce_enabled=bool(announce_enabled),
+        transition_seconds=transition_seconds,
     )

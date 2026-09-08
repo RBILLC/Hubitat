@@ -13,7 +13,9 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
+
+T = TypeVar("T")
 
 #: Total read attempts (the original try plus retries) before giving up.
 DEFAULT_READ_RETRIES = 3
@@ -65,16 +67,22 @@ class DdcPort(ABC):
     def write_vcp(self, code: int, value: int) -> None:
         """Write `value` to the given VCP feature code."""
 
+    @abstractmethod
+    def read_capabilities(self) -> str:
+        """Return the monitor's raw DDC/CI capabilities string."""
+
 
 def _read_with_retries(
-    read_once: Callable[[], tuple[int, int]],
+    read_once: Callable[[], T],
     retries: int = DEFAULT_READ_RETRIES,
     delay: float = DEFAULT_READ_RETRY_DELAY,
-) -> tuple[int, int]:
+) -> T:
     """Call `read_once()` up to `retries` times, pausing `delay` seconds
     between attempts, and re-raise the last `DdcError` if every attempt
-    fails. Shared by both port implementations so the retry behaviour can
-    be exercised through `FakeDdcPort` in tests.
+    fails. Shared by every retried read -- VCP reads and capabilities
+    reads alike -- so the retry behaviour can be exercised through
+    `FakeDdcPort` in tests. Generic in the return type so it serves both
+    `read_vcp` (`tuple[int, int]`) and `read_capabilities` (`str`).
     """
     last_error: Optional[DdcError] = None
     for attempt in range(retries):
@@ -170,6 +178,15 @@ class WindowsDdcPort(DdcPort):
             ctypes.POINTER(wintypes.DWORD),
         ]
         self._dxva2.DestroyPhysicalMonitors.argtypes = [wintypes.DWORD, ctypes.POINTER(PHYSICAL_MONITOR)]
+        self._dxva2.GetCapabilitiesStringLength.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        self._dxva2.CapabilitiesRequestAndCapabilitiesReply.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_char_p,
+            wintypes.DWORD,
+        ]
 
     # -- monitor enumeration -------------------------------------------------
 
@@ -309,6 +326,41 @@ class WindowsDdcPort(DdcPort):
         finally:
             self._destroy(arr)
 
+    # -- capabilities -----------------------------------------------------
+
+    def read_capabilities(self) -> str:
+        """Return the monitor's raw DDC/CI capabilities string.
+
+        Calls `GetCapabilitiesStringLength` then
+        `CapabilitiesRequestAndCapabilitiesReply`. Microsoft documents both
+        as "usually returns quickly, but sometimes it can take several
+        seconds to complete"; issue #28 saw the first
+        `GetCapabilitiesStringLength` call on the RD280UG fail with
+        `GetLastError()` -1071241845, with the retry 50ms later succeeding.
+        So this goes through the same three-attempt retry as `read_vcp`.
+        """
+        return _read_with_retries(self._read_capabilities_once, self._retries, self._retry_delay)
+
+    def _read_capabilities_once(self) -> str:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+        arr = self._select_physical_monitor()
+        try:
+            handle = arr[0].hPhysicalMonitor
+            length = wintypes.DWORD()
+            if not self._dxva2.GetCapabilitiesStringLength(handle, ctypes.byref(length)):
+                raise DdcError("GetCapabilitiesStringLength failed", ctypes.get_last_error())
+            buffer = ctypes.create_string_buffer(length.value)
+            if not self._dxva2.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length.value):
+                raise DdcError(
+                    "CapabilitiesRequestAndCapabilitiesReply failed", ctypes.get_last_error()
+                )
+            # buffer.value stops at the first NUL, so the trailing
+            # terminator counted in `length` is already gone here.
+            return buffer.value.decode("latin-1")
+        finally:
+            self._destroy(arr)
+
 
 class FakeDdcPort(DdcPort):
     """In-memory DDC port for tests and `--dry-run`.
@@ -319,7 +371,10 @@ class FakeDdcPort(DdcPort):
     (preserving the existing maximum). `fail_reads` maps VCP code -> a
     count of scripted read failures still owed; each read of that code
     consumes one before falling through to `registers`, which is how
-    tests exercise the retry path without hardware.
+    tests exercise the retry path without hardware. `capabilities` is the
+    raw string `read_capabilities` returns; `fail_capabilities` is a
+    counter of scripted capabilities-read failures still owed, consumed
+    one per attempt the same way `fail_reads` is, for the same reason.
     """
 
     def __init__(
@@ -328,6 +383,7 @@ class FakeDdcPort(DdcPort):
         registers: Optional[dict[int, tuple[int, int]]] = None,
         retries: int = DEFAULT_READ_RETRIES,
         retry_delay: float = 0.0,
+        capabilities: str = "",
     ):
         self.monitors: list[MonitorInfo] = list(monitors) if monitors else [
             MonitorInfo(device_name="DRYRUN1", primary=True, description="Generic PnP Monitor"),
@@ -335,6 +391,8 @@ class FakeDdcPort(DdcPort):
         self.registers: dict[int, tuple[int, int]] = dict(registers) if registers else {}
         self.writes: list[tuple[int, int]] = []
         self.fail_reads: dict[int, int] = {}
+        self.capabilities: str = capabilities
+        self.fail_capabilities: int = 0
         self._retries = retries
         self._retry_delay = retry_delay
 
@@ -357,3 +415,12 @@ class FakeDdcPort(DdcPort):
         self.writes.append((code, value))
         _, existing_max = self.registers.get(code, (value, value))
         self.registers[code] = (value, existing_max)
+
+    def read_capabilities(self) -> str:
+        return _read_with_retries(self._read_capabilities_once, self._retries, self._retry_delay)
+
+    def _read_capabilities_once(self) -> str:
+        if self.fail_capabilities > 0:
+            self.fail_capabilities -= 1
+            raise DdcError("simulated capabilities read failure")
+        return self.capabilities
