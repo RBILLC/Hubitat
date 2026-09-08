@@ -49,7 +49,7 @@ The sequence of hardware-step writes that realises a Transition, one write per h
 _Avoid_: animation, interpolation
 
 **Sweep time**:
-The Transition a full nine-step brightness move takes. The Bridge's default pace and the Driver's Default transition preference are Sweep times: every move keeps the same interval between writes, a ninth of the Sweep time, so a short move finishes sooner. A Transition passed with a command is instead the total time for that move.
+The Transition a full nine-step brightness move takes. The Bridge's default pace and the Driver's Default transition preference are Sweep times: every move keeps the same interval between writes, a ninth of the Sweep time, so a short move finishes sooner. A Sweep time too short for every step at the monitor's write pace drops steps evenly rather than slowing down. A Transition passed with a command is instead the total time for that move.
 _Avoid_: default transition (when meaning the concept), rate, speed
 
 **Target state**:

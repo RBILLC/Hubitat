@@ -49,7 +49,9 @@ DEFAULTS: dict[str, Any] = {
     # full nine-step brightness move takes when a command carries no
     # `transition` or `sweep`; every move runs at that pace (a ninth of it
     # between writes, floored at the write pace), so shorter moves finish
-    # sooner. 0 makes every default-paced change immediate.
+    # sooner. Below 0.54 s (nine writes at the floor) steps are dropped
+    # evenly instead of slowing the writes. 0 makes every default-paced
+    # change immediate.
     "transition_seconds": 0.6,
 }
 
