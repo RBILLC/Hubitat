@@ -143,7 +143,7 @@ time a full nine-step brightness move takes: one write every ninth of it (floore
 dropped, so a move of n hardware steps ends after n - 1 intervals. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.5"}`, no allowlist check, for a local liveness probe. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.6"}`, no allowlist check, for a local liveness probe. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 

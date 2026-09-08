@@ -6,4 +6,4 @@ hands-on DDC access (`monitors`/`read`/`write`) and serving the HTTP bridge
 """
 
 #: Bridge version, kept in lockstep with the Driver's header version.
-__version__ = "0.0.5"
+__version__ = "0.0.6"
