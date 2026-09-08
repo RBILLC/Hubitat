@@ -90,13 +90,13 @@ class TestAnnounceDefaults(ConfigTestCase):
 
 
 class TestTransitionSeconds(ConfigTestCase):
-    def test_missing_file_defaults_to_0_6(self):
+    def test_missing_file_defaults_to_0_3(self):
         config = load_config(self.tmp_dir / "absent.json")
-        self.assertEqual(config.transition_seconds, 0.6)
+        self.assertEqual(config.transition_seconds, 0.3)
 
     def test_documented_default_present(self):
         self.assertIn("transition_seconds", DEFAULTS)
-        self.assertEqual(DEFAULTS["transition_seconds"], 0.6)
+        self.assertEqual(DEFAULTS["transition_seconds"], 0.3)
 
     def test_boundary_values_0_and_60_accepted(self):
         config = load_config(self.write({"transition_seconds": 0}))
