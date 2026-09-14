@@ -36,9 +36,13 @@ _Avoid_: raw value, native value, monitor value
 Brightness as the Hub expresses it, a percentage from 0 to 100. Only the Bridge converts a level into a hardware step.
 _Avoid_: brightness percent, dim level
 
-**Connection state**:
-Whether the Hub could reach the Bridge on its last attempt: online, offline, or unknown. Offline is how the Driver shows a MoonHalo whose PC is powered down, like a bulb with no power.
-_Avoid_: health, presence, reachability
+**Bridge link**:
+Whether the Hub could reach the Bridge on its last attempt: online, offline, or unknown. Offline is how the Driver shows a MoonHalo whose PC is powered down, like a bulb with no power. A reply from the Bridge, even one reporting a failure, means the link is online.
+_Avoid_: connection state, health, presence, reachability, bridge state
+
+**Monitor link**:
+Whether the Bridge could talk to the monitor over DDC/CI on its last attempt, whatever the attempt was: ok, failed, or unknown. Failed says only that the last attempt failed; the Bridge cannot tell a stuck link from DDC/CI switched off at the monitor.
+_Avoid_: monitor state, DDC state, DDC/CI state, bridge state, channel
 
 **Transition**:
 The time over which the Bridge moves the MoonHalo from its applied setting to the target setting. Zero means the change is immediate.
