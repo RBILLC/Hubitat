@@ -10,43 +10,44 @@
  * 1000 or more is Kelvin) and /moonhalo/status; the first four also take
  * transition=<seconds> or sweep=<seconds>. Each reply is
  * {"ok": true, "state": {power, level, brightnessStep, colorTemperature,
- * colorTempStep, monitor}} or {"ok": false, "error": "..."}.
+ * colorTempStep, monitor}, "monitor": {link, error, at}} or
+ * {"ok": false, "error": "...", "monitor": {...}}.
  *
  * Author: RBILLC
  * Import URL: https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy
  *
  * Behaviour:
- * - connectionState goes offline when the Bridge cannot be reached, like a
- *   bulb with no power; switch and level keep their last known values.
- * - Attribute events are emitted only after the Bridge confirms a request,
- *   from the state carried in its reply. Nothing is assumed optimistically.
- * - The Transition (setLevel's rate, setColorTemperature's tt) is forwarded
- *   to the Bridge as the transition query parameter, in seconds: 0 makes the
- *   change immediate. Without a rate, the Default transition preference (ms,
- *   default 300) goes as the sweep query parameter in seconds; blank leaves
- *   the Bridge default in place.
- * - on() only asks the Bridge to turn on; the Bridge restores the level it
- *   remembers (or its configured default). The Driver keeps no copy of that
- *   level: Hubitat's Google Home app sends setLevel and then on() for one
- *   slider move, and a Driver-side copy replayed the old level over the new.
+ * - bridgeLink: whether the Hub could reach the Bridge. Offline is a MoonHalo
+ *   whose PC is off, like a bulb with no power; switch and level keep their
+ *   last values. Any reply from the Bridge, a 500 included, is online.
+ * - monitorLink: whether the Bridge could talk to the monitor over DDC/CI on
+ *   its last attempt (ok, failed, unknown), from the monitor object of every
+ *   reply; the last error text and time are kept in state. Commands are
+ *   always sent whatever it says.
+ * - Attribute events come only from the state in the Bridge's reply.
+ * - setLevel's rate and setColorTemperature's tt go to the Bridge as
+ *   transition (seconds; 0 snaps); without one, the Default transition
+ *   preference (ms) goes as sweep; blank leaves the Bridge default.
+ * - on() sends no level: the Bridge restores the level it remembers. Google
+ *   Home sends setLevel then on() for one slider move.
  * - setColorTemperature while off turns the MoonHalo on, unless colour
- *   pre-staging is enabled, in which case the colour is stored for later.
- * - No hardware knowledge lives here: no VCP registers, no step maths. The
- *   only hardware-shaped value is the 1-7 step passed through by
- *   setColorTempStep.
- * - The Bridge announces its own LAN address through the Maker API by calling
- *   setBridgeAddress(ip, port) at startup and then every minute. The announced
- *   address is used in preference to the typed Bridge IP, which only matters
- *   until the first announcement arrives. Once an announcement has arrived, a
- *   once-a-minute check marks the Bridge offline when nothing has been heard
- *   from it (no announcement and no reply) for longer than the announcement
- *   timeout. Changing the typed IP or port forgets the announced address
- *   until the next announcement; saving other preferences keeps it.
+ *   pre-staging is enabled.
+ * - No hardware knowledge lives here beyond the 1-7 step of setColorTempStep.
+ * - The Bridge announces its LAN address through the Maker API
+ *   (setBridgeAddress) at startup and every minute. It is used over the typed
+ *   IP, and silence past the announcement timeout marks bridgeLink offline.
+ *   Retyping the IP or port forgets the announced address.
+ * - State: announcedIp/announcedPort; lastSeen/lastAnnounce readable, with
+ *   epoch twins lastSeenAt/lastAnnounceAt for the timeout arithmetic;
+ *   monitorLinkError/monitorLinkErrorAt.
  *
- * Version: 0.0.11 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.12 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-14 0.0.12 - bridgeLink replaces connectionState; monitorLink from the Bridge's monitor
+ *                     object; a 500 keeps bridgeLink online; readable lastSeen/lastAnnounce and
+ *                     announcedIp/announcedPort state (issue #39)
  * 2026-09-08 0.0.11 - Default transition is whole milliseconds, default 300: the decimal input would
  *                     not accept values under 1.0 on the device page (issue #37)
  * 2026-09-08 0.0.10 - Default transition (seconds) preference, sent as the sweep query parameter
@@ -91,7 +92,8 @@ metadata {
         capability "Refresh"
 
 
-        attribute "connectionState", "enum", ["unknown", "online", "offline"]
+        attribute "bridgeLink", "enum", ["unknown", "online", "offline"]
+        attribute "monitorLink", "enum", ["unknown", "ok", "failed"]
         attribute "bridgeAddress", "string"
 
         command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware colour temperature step, 1 (warm) to 7 (cool)"]]
@@ -122,7 +124,8 @@ metadata {
 
 void installed() {
     log.info "installed..."
-    sendEvent(name: "connectionState", value: "unknown", descriptionText: "${device.displayName} connectionState is unknown")
+    sendEvent(name: "bridgeLink", value: "unknown", descriptionText: "${device.displayName} bridgeLink is unknown")
+    sendEvent(name: "monitorLink", value: "unknown", descriptionText: "${device.displayName} monitorLink is unknown")
     initialize()
 }
 
@@ -139,7 +142,7 @@ void updated() {
     log.warn "debug logging is: ${logEnable == true}"
     log.warn "description logging is: ${txtEnable == true}"
     purgeStaleAttributes()
-    state.remove("lastLevel")
+    ["lastLevel", "bridgeIp", "bridgePort"].each { String key -> state.remove(key) }
     forgetAnnouncedAddressIfTypedChanged()
     unschedule()
     schedulePoll()
@@ -158,13 +161,12 @@ private void forgetAnnouncedAddressIfTypedChanged() {
     String previous = state.typedAddress?.toString()
     state.typedAddress = typed
     if (previous == null || previous == typed) return
-    if (state.bridgeIp != null || state.bridgePort != null) {
-        logDebug "typed address changed to ${typed}; announced address ${state.bridgeIp}:${state.bridgePort} forgotten until the next announcement"
+    if (state.announcedIp != null || state.announcedPort != null) {
+        logDebug "typed address changed to ${typed}; announced address ${state.announcedIp}:${state.announcedPort} forgotten until the next announcement"
     }
-    state.remove("bridgeIp")
-    state.remove("bridgePort")
-    state.remove("lastAnnounceAt")
-    state.remove("lastSeenAt")
+    ["announcedIp", "announcedPort", "lastAnnounceAt", "lastAnnounce", "lastSeenAt", "lastSeen"].each { String key ->
+        state.remove(key)
+    }
 }
 
 // Called from installed(); the status poll covers hub restarts.
@@ -177,7 +179,7 @@ void initialize() {
 // Google Home types a device by its attribute set, and attribute values outlive the driver
 // that created them, so remove the ones this version no longer declares.
 private void purgeStaleAttributes() {
-    ["colorMode"].each { String name ->
+    ["colorMode", "connectionState"].each { String name ->
         try {
             if (device.currentValue(name, true) != null) {
                 device.deleteCurrentState(name)
@@ -336,10 +338,11 @@ void setBridgeAddress(ip, port) {
     String announced = "${address}:${bridgePort}"
     Boolean changed = device.currentValue("bridgeAddress") != announced
     Boolean first = (state.lastAnnounceAt == null)
-    state.bridgeIp = address
-    state.bridgePort = bridgePort
-    state.lastAnnounceAt = now()
-    state.lastSeenAt = state.lastAnnounceAt
+    state.announcedIp = address
+    state.announcedPort = bridgePort
+    Long at = now()
+    state.lastAnnounceAt = at
+    state.lastAnnounce = formatTime(at)
     emitEvent("bridgeAddress", announced, null, "${device.displayName} bridgeAddress ${changed ? 'was set to' : 'is'} ${announced}", changed)
     markOnline()
     // A driver-code update alone never runs updated(), so the first
@@ -424,12 +427,12 @@ private String sweepSeconds() {
 private void sendBridge(String path, Map data) {
     Map callbackData = (data ?: [:])
     String command = callbackData.command ?: "request"
-    String ip = (state.bridgeIp ?: settings.bridgeIp ?: "").toString().trim()
+    String ip = (state.announcedIp ?: settings.bridgeIp ?: "").toString().trim()
     if (!ip) {
         log.warn "${device.displayName}: Bridge IP address is not set, ${command} ignored"
         return
     }
-    Integer announcedPort = asInteger(state.bridgePort)
+    Integer announcedPort = asInteger(state.announcedPort)
     Integer port = limitIntegerRange((announcedPort != null) ? announcedPort : prefInt("bridgePort", 5000), 1, 65535)
     Integer timeout = limitIntegerRange(prefInt("timeoutSec", 5), 1, 30)
     String uri = "http://${ip}:${port}${path}"
@@ -443,54 +446,25 @@ private void sendBridge(String path, Map data) {
     }
 }
 
-// The AsyncResponse API is not documented, so every accessor is guarded:
-// an error or non-200 reply marks the Bridge offline and touches nothing
-// else; ok false marks online and logs the Bridge's message; ok true marks
-// online and applies the returned state.
+// Any reply from the Bridge, a 500 included, keeps bridgeLink online: only
+// no reply, an unreadable body or one without "ok" marks it offline. The
+// AsyncResponse API is not documented, so every accessor is guarded.
 void bridgeCallback(resp, data) {
     String command = (data instanceof Map && data.command) ? data.command.toString() : "request"
     try {
-        Boolean failed = false
-        try {
-            failed = (resp == null) || (resp.hasError() == true)
-        } catch (Exception e) {
-            failed = true
-        }
-        if (failed) {
-            String message = null
-            try {
-                message = resp?.getErrorMessage()
-            } catch (Exception e) {
-                message = null
-            }
-            markOffline("${command} failed: ${message ?: 'no response'}")
-            return
-        }
-
-        Integer status = null
-        try {
-            status = resp.status as Integer
-        } catch (Exception e) {
-            status = null
-        }
-        if (status != 200) {
-            markOffline("${command} returned HTTP ${status}")
-            return
-        }
-
         Map json = parseReply(resp)
-        if (json == null) {
-            markOffline("${command} returned an unreadable reply")
-            return
-        }
-
-        if (json.get("ok") != true) {
-            markOnline()
-            log.warn "${device.displayName}: Bridge rejected ${command}: ${json.get('error') ?: 'no error given'}"
+        if (json == null || !json.containsKey("ok")) {
+            markOffline("${command} got no Bridge reply (${replyFailure(resp)})")
             return
         }
 
         markOnline()
+        applyMonitorLink(json.get("monitor"))
+        if (json.get("ok") != true) {
+            log.warn "${device.displayName}: Bridge rejected ${command}: ${json.get('error') ?: 'no error given'}"
+            return
+        }
+
         Object halo = json.get("state")
         applyState((halo instanceof Map) ? (Map) halo : null, data)
 
@@ -505,26 +479,39 @@ void bridgeCallback(resp, data) {
     }
 }
 
-// resp.json first; if that fails, parse resp.data ourselves.
+// The reply body as a map, or null. A non-2xx reply keeps its body on the
+// error side (errorData; errorJson has thrown on some hub versions), see
+// docs/research/hubitat-async-response-errors.md.
 private Map parseReply(resp) {
-    Object json = null
+    if (resp == null) return null
+    Map json = readMap { resp.json }
+    if (json == null) json = readMap { resp.errorJson }
+    if (json == null) json = readMap { parseJsonText(resp.data) }
+    if (json == null) json = readMap { parseJsonText(resp.errorData) }
+    return json
+}
+
+private Map readMap(Closure read) {
     try {
-        json = resp.json
+        Object value = read()
+        return (value instanceof Map) ? (Map) value : null
     } catch (Exception e) {
-        json = null
+        return null
     }
-    if (!(json instanceof Map)) {
-        try {
-            Object raw = resp.data
-            if (raw != null && raw.toString().trim()) {
-                json = new groovy.json.JsonSlurper().parseText(raw.toString())
-            }
-        } catch (Exception e) {
-            logDebug "reply body is not JSON: ${e.message}"
-            json = null
-        }
-    }
-    return (json instanceof Map) ? (Map) json : null
+}
+
+private Object parseJsonText(Object raw) {
+    if (raw == null || !raw.toString().trim()) return null
+    return new groovy.json.JsonSlurper().parseText(raw.toString())
+}
+
+// "HTTP 408, Request Timeout" or "no response", for the offline reason.
+private String replyFailure(resp) {
+    if (resp == null) return "no response"
+    List parts = []
+    try { if (resp.status != null) parts << "HTTP ${resp.status}" } catch (Exception e) { }
+    try { if (resp.getErrorMessage()) parts << resp.getErrorMessage() } catch (Exception e) { }
+    return parts ? parts.join(", ") : "no response"
 }
 
 // ---------------------------------------------------------------------------
@@ -593,27 +580,57 @@ private void emitEvent(String name, value, String unit, String descriptionText, 
     sendEvent(event)
 }
 
+// monitorLink from a reply's monitor object. One warning naming the error on
+// the transition to failed, debug on repeats, info on recovery; the last
+// error text and time go to state. switch and level are never touched.
+private void applyMonitorLink(Object monitor) {
+    if (!(monitor instanceof Map)) return
+    Map reported = (Map) monitor
+    String value = reported.link?.toString()
+    if (!(value in ["ok", "failed", "unknown"])) return
+    String name = device.displayName
+    String current = device.currentValue("monitorLink", true)
+    Boolean changed = current != value
+    if (value == "failed") {
+        String error = reported.error?.toString() ?: "no error given"
+        state.monitorLinkError = error
+        state.monitorLinkErrorAt = formatIso(reported.at?.toString()) ?: formatTime(now())
+        if (changed) {
+            log.warn "${name}: Monitor link failed (${error})"
+        } else {
+            logDebug "Monitor link still failed (${error})"
+        }
+    } else if (changed) {
+        log.info "${name}: Monitor link ${value}"
+    }
+    if (changed) {
+        sendEvent(name: "monitorLink", value: value, descriptionText: "${name} monitorLink was set to ${value}")
+    }
+}
+
 // Offline is how a MoonHalo whose PC is powered down is shown. The warning
 // is logged once, on the transition; repeats go to debug. switch and level
 // are never touched here.
 private void markOffline(String reason) {
-    String current = device.currentValue("connectionState", true)
+    String current = device.currentValue("bridgeLink", true)
     if (current != "offline") {
-        String descriptionText = "${device.displayName} connectionState was set to offline"
-        sendEvent(name: "connectionState", value: "offline", descriptionText: descriptionText)
-        log.warn "${device.displayName}: Bridge offline (${reason})"
+        String descriptionText = "${device.displayName} bridgeLink was set to offline"
+        sendEvent(name: "bridgeLink", value: "offline", descriptionText: descriptionText)
+        log.warn "${device.displayName}: Bridge link offline (${reason})"
     } else {
-        logDebug "Bridge still offline (${reason})"
+        logDebug "Bridge link still offline (${reason})"
     }
 }
 
 private void markOnline() {
-    state.lastSeenAt = now()
-    String current = device.currentValue("connectionState", true)
+    Long at = now()
+    state.lastSeenAt = at
+    state.lastSeen = formatTime(at)
+    String current = device.currentValue("bridgeLink", true)
     if (current != "online") {
-        String descriptionText = "${device.displayName} connectionState was set to online"
-        sendEvent(name: "connectionState", value: "online", descriptionText: descriptionText)
-        log.info "${device.displayName}: Bridge online"
+        String descriptionText = "${device.displayName} bridgeLink was set to online"
+        sendEvent(name: "bridgeLink", value: "online", descriptionText: descriptionText)
+        log.info "${device.displayName}: Bridge link online"
     }
 }
 
@@ -652,6 +669,23 @@ private Long asLong(value) {
         return new BigDecimal(value.toString().trim()).longValue()
     } catch (Exception e) {
         return null
+    }
+}
+
+// "yyyy-MM-dd HH:mm:ss" in the hub's time zone; null for a null time.
+private String formatTime(Long millis) {
+    if (millis == null) return null
+    return new Date(millis).format("yyyy-MM-dd HH:mm:ss", location.timeZone)
+}
+
+// The Bridge's ISO 8601 time with offset ("2026-09-14T17:40:12-04:00") in the
+// hub's time zone; the text as sent if it cannot be parsed; null for none.
+private String formatIso(String iso) {
+    if (!iso) return null
+    try {
+        return formatTime(Date.parse("yyyy-MM-dd'T'HH:mm:ssXXX", iso).time)
+    } catch (Exception e) {
+        return iso
     }
 }
 
