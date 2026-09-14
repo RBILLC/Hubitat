@@ -115,9 +115,10 @@ VCP writes it produced, and the outcome, for example:
 ## HTTP API
 
 Every endpoint is a GET request and returns JSON. A successful call returns
-`{"ok": true, "state": {...}}`; a failed one returns `{"ok": false, "error": "..."}` with an
-HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/CI failure).
-`state` always has the same shape:
+`{"ok": true, "state": {...}, "monitor": {...}}`; a failed one returns
+`{"ok": false, "error": "..."}` with an HTTP status of 400 (bad input), 403 (caller not in the
+allowlist), or 500 (DDC/CI failure, with the `monitor` object as well). `state` always has the
+same shape:
 
 | Field | Meaning |
 |---|---|
@@ -127,6 +128,19 @@ HTTP status of 400 (bad input), 403 (caller not in the allowlist), or 500 (DDC/C
 | `colorTempStep` | Hardware colour step, 1-7 (1 warm). |
 | `colorTemperature` | Colour temperature in Kelvin. |
 | `monitor` | The selected monitor's description string. |
+
+Next to `state`, every reply the monitor had a hand in -- `/moonhalo/status`, `/health`, each
+success reply and the 500 body of a failed command -- carries the **Monitor link** as one
+`monitor` object: whether the Bridge could talk to the monitor over DDC/CI on its last attempt,
+whatever that attempt was (a command write, a Ramp write on the worker thread, or the D9 read
+that resolves an unknown step). The Driver shows it as `monitorLink` and its status poll picks
+it up without sending a command, which is how a failed Monitor link is seen from the Hub.
+
+| Field | Meaning |
+|---|---|
+| `link` | `"unknown"` until the first DDC/CI call after start-up, then `"ok"` after any success or `"failed"` after any failure. Failed says only that the last attempt failed: a stuck link and DDC/CI switched off in the monitor's OSD look the same. |
+| `error` | The error text of the last failure, for example `SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)`; `null` when the link is `ok` or `unknown`. |
+| `at` | When the last attempt was made, ISO 8601 with the PC's UTC offset; `null` until the first. |
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
@@ -145,8 +159,8 @@ intervals. A shorter Sweep time keeps the writes ~60ms apart and drops steps eve
 sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the same share of that,
 rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
-| `GET /moonhalo/status` | none | Returns the remembered state; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.6"}`, no allowlist check, for a local liveness probe. |
+| `GET /moonhalo/status` | none | Returns the remembered state and the Monitor link; performs no DDC/CI call. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.7", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -161,7 +175,22 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "colorTemperature": 4600,
     "monitor": "Generic PnP Monitor"
   },
-  "transition": {"seconds": 0.0, "steps": 1}
+  "transition": {"seconds": 0.0, "steps": 1},
+  "monitor": {"link": "ok", "error": null, "at": "2026-09-14T17:56:03-04:00"}
+}
+```
+
+The same command while the monitor is not answering replies with a 500:
+
+```json
+{
+  "ok": false,
+  "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
+  "monitor": {
+    "link": "failed",
+    "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
+    "at": "2026-09-14T17:40:12-04:00"
+  }
 }
 ```
 
@@ -250,8 +279,8 @@ log carries one warning such as `announcement of 192.168.86.115:5000 to hub 192.
 failed: HTTPError: HTTP Error 401: Unauthorized`, then stays quiet until it succeeds and logs
 the address again. Announcement failures never affect MoonHalo commands. The Bridge binds its
 port before the first announcement, so a Bridge that fails to start never tells the Hub it is
-up. On the Hub, the device's `bridgeAddress` attribute shows `ip:port` and `connectionState`
-is online; the device's events show the announcement.
+up. On the Hub, the device's `bridgeAddress` attribute shows `ip:port` and `bridgeLink` is
+online; the device's events show the announcement.
 
 On the Hub side the Driver treats any reply from the Bridge as proof of life, not only
 announcements: once an announcement has ever arrived, the device goes offline only when
@@ -350,8 +379,8 @@ schtasks /end /tn "MoonHaloBridge"
 schtasks /delete /tn "MoonHaloBridge" /f
 ```
 
-Verify: after `schtasks /run`, `curl http://localhost:5000/health` answers `{"ok": true}` and the
-Hub's device page shows `connectionState` online on its next poll or Refresh. Stop any copy of
+Verify: after `schtasks /run`, `curl http://localhost:5000/health` answers `{"ok": true, ...}` and
+the Hub's device page shows `bridgeLink` online on its next poll or Refresh. Stop any copy of
 the Bridge you started by hand first, or the task's copy will fail with "port in use".
 
 ## Running as a Windows service (NSSM, alternative)
@@ -435,7 +464,8 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `serve` fails to start, e.g. "port in use" / `OSError: [WinError 10048]` | Another process (perhaps a previous `serve` still running, or the NSSM service) is already bound to `config.json`'s `port`. Stop it first (`nssm stop MoonHaloBridge`, or find and end the other `python.exe`/`pythonw.exe` process), or change `port` in `config.json`. |
 | `bridge.log` shows `announcement of ... failed: HTTPError: HTTP Error 401` (or 404 / 500) | The Maker API rejected the call. 401 or 403: the token is wrong or **Allow Access via Local IP Address** is off. 404 or 500: the app id or device id is wrong, or the MoonHalo device is not selected in the Maker API app, or the Driver on the Hub is older than 0.0.8 and has no `setBridgeAddress` command. |
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
-| The device page shows `connectionState` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
+| The device page shows `bridgeLink` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
+| The device page shows `monitorLink` failed (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails with `Win32 error -1071241854`, and `/health` is fine | The Monitor link is down while the Bridge itself is healthy; the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (2) power-cycle the monitor at its button; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. `monitorLinkError` and `monitorLinkErrorAt` on the device page hold the last error and its time; the first command after the link is back sets `monitorLink` ok. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
 | A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition (ms)** preference as `sweep`) keeps that pace at any Sweep time of `0.54` or less, writing fewer of the nine steps the shorter it is (six at `0.3`, which looked smooth on the real halo); a longer Sweep time spaces the writes out, which is what reads as stepping. An explicit `transition` from a rule is a total time and spreads its writes over exactly that, so a long one steps visibly too -- pass a shorter time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |

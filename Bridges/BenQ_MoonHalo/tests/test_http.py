@@ -133,7 +133,14 @@ class TestHealth(HttpTestCase):
     def test_health_ok_with_no_ddc_call(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {"ok": True, "version": __version__})
+        self.assertEqual(
+            response.get_json(),
+            {
+                "ok": True,
+                "version": __version__,
+                "monitor": {"link": "unknown", "error": None, "at": None},
+            },
+        )
         self.assertEqual(self.port.writes, [])
 
 
@@ -1713,6 +1720,131 @@ class TestAccessDenialLogging(AccessControlTestCase):
         for handler in list(logger.handlers):
             handler.close()
             logger.removeHandler(handler)
+
+
+class TestMonitorLinkReplies(HttpTestCase):
+    """Issue #39: every reply carries the **Monitor link** as one `monitor`
+    object -- `/moonhalo/status`, `/health`, every success reply and the
+    500 body of a failed command -- so the Driver's status poll surfaces
+    a failed Monitor link without a command."""
+
+    UNKNOWN = {"link": "unknown", "error": None, "at": None}
+
+    def _arm_failure(self, error: DdcError) -> None:
+        def failing_write(code: int, value: int) -> None:
+            raise error
+
+        self.port.write_vcp = failing_write
+
+    def _disarm_failure(self) -> None:
+        del self.port.write_vcp
+
+    def test_fresh_bridge_reports_unknown_on_status_and_health(self):
+        self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"], self.UNKNOWN)
+        self.assertEqual(self.client.get("/health").get_json()["monitor"], self.UNKNOWN)
+
+    def test_health_never_makes_a_ddc_call(self):
+        self.port.fail_reads[VCP_D9] = 3
+        self._arm_failure(DdcError("would have failed"))
+        for _ in range(3):
+            self.assertEqual(self.client.get("/health").get_json()["monitor"], self.UNKNOWN)
+        self.assertEqual(self.port.writes, [])
+
+    def test_success_reply_carries_ok_with_a_timestamp(self):
+        body = self.client.get("/moonhalo/on?level=50&transition=0").get_json()
+        self.assertEqual(body["monitor"]["link"], "ok")
+        self.assertIsNone(body["monitor"]["error"])
+        self.assertIsInstance(body["monitor"]["at"], str)
+        for path in ("/moonhalo/off?transition=0", "/moonhalo/brightness/50?transition=0",
+                     "/moonhalo/colortemp/7?transition=0", "/moonhalo/status"):
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).get_json()["monitor"]["link"], "ok")
+
+    def test_failed_command_reports_failed_everywhere_until_the_next_success(self):
+        outage = DdcError("SetVCPFeature failed for VCP 0xD9", -1071241854)
+        self._arm_failure(outage)
+
+        response = self.client.get("/moonhalo/brightness/50?transition=0")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], str(outage))
+        self.assertEqual(body["monitor"]["link"], "failed")
+        self.assertEqual(body["monitor"]["error"], str(outage))
+        self.assertIsInstance(body["monitor"]["at"], str)
+        failed = body["monitor"]
+
+        self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"], failed)
+        self.assertEqual(self.client.get("/health").get_json()["monitor"], failed)
+
+        self._disarm_failure()
+        body = self.client.get("/moonhalo/brightness/50?transition=0").get_json()
+        self.assertEqual(body["monitor"]["link"], "ok")
+        self.assertIsNone(body["monitor"]["error"])
+        self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"]["link"], "ok")
+
+    def test_state_still_carries_the_monitor_description(self):
+        body = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(body["state"]["monitor"], "Generic PnP Monitor")
+
+
+class TestMonitorLinkOnRampWrites(HttpTestCase):
+    """Issue #39: Ramp writes on the worker thread set the Monitor link too."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config = make_config(self.tmp_dir)
+        self.port = FailingWritesDdcPort()
+        self.model = MoonHaloModel(self.port, self.config)
+        self.app = create_app(self.model, self.config)
+        self.app.testing = True
+        self.client = self.app.test_client()
+
+    def _start_at_level(self, level: int) -> None:
+        response = self.client.get(f"/moonhalo/brightness/{level}?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.port.writes.clear()
+
+    def test_aborted_final_write_leaves_failed_on_the_status_poll(self):
+        self._start_at_level(1)
+        final_value = pack_d9(self.config.default_colortemp_step, 10)
+        self.port.fail_writes = {final_value: 2}
+
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING"):
+            self.client.get("/moonhalo/brightness/100?transition=0.6")
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and len(self.port.writes) < 8:
+                time.sleep(0.01)
+            time.sleep(0.2)
+
+        monitor = self.client.get("/moonhalo/status").get_json()["monitor"]
+        self.assertEqual(monitor["link"], "failed")
+        self.assertEqual(monitor["error"], f"simulated write failure for D9 value 0x{final_value:04X}")
+        self.assertIsInstance(monitor["at"], str)
+
+    def test_skipped_intermediate_write_sets_failed_then_the_ramp_sets_ok(self):
+        self._start_at_level(1)
+        skipped_value = pack_d9(self.config.default_colortemp_step, 5)
+        self.port.fail_writes = {skipped_value: 1}
+        seen: list[str] = []
+        original_write = self.port.write_vcp
+
+        def observing_write(code: int, value: int) -> None:
+            seen.append(self.model.monitor_link.link)
+            original_write(code, value)
+
+        self.port.write_vcp = observing_write
+
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING"):
+            self.client.get("/moonhalo/brightness/100?transition=0.6")
+            writes = _wait_for_writes(self.port, 8)
+        self.assertEqual(len(writes), 8)
+        # the write after the skipped one saw the link failed ...
+        self.assertIn("failed", seen)
+        # ... and the successful writes after it set it ok again
+        self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"]["link"], "ok")
 
 
 if __name__ == "__main__":

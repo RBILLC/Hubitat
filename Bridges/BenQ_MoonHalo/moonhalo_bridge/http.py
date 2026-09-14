@@ -4,6 +4,12 @@ MoonHalo model.
 `create_app(model, config, arp)` builds the Flask app. A `before_request`
 hook enforces the access-control allowlists (`allowed_macs`, `allowed_ips`,
 `allow_loopback`) from `config` on every path except `/health`.
+
+Every reply the model had a hand in -- `/moonhalo/status`, `/health`,
+each success reply and the 500 body of a failed command -- carries the
+**Monitor link** (issue #39) as one `monitor` object, `{"link", "error",
+"at"}` from `model.monitor_link`, so the Driver's status poll sees a failed
+Monitor link without sending a command.
 """
 from __future__ import annotations
 
@@ -177,6 +183,31 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
             return jsonify({"ok": False, "error": "forbidden"}), 403
         return None
 
+    def monitor() -> dict[str, Any]:
+        """The Monitor link object every model-backed reply carries."""
+        return model.monitor_link.to_dict()
+
+    def ok_reply(state: dict[str, Any]):
+        """The 200 body of on/off/brightness/colortemp: state, the
+        Transition applied, and the Monitor link."""
+        return (
+            jsonify(
+                {
+                    "ok": True,
+                    "state": state,
+                    "transition": model.last_transition.to_dict(),
+                    "monitor": monitor(),
+                }
+            ),
+            200,
+        )
+
+    def ddc_failure(endpoint: str, error: DdcError):
+        """The 500 body of a command whose DDC/CI call failed: the error
+        text and the Monitor link the failure just set."""
+        _log_request(logger, endpoint, model.last_writes, f"error:{error}")
+        return jsonify({"ok": False, "error": str(error), "monitor": monitor()}), 500
+
     def pacing_queries(endpoint: str):
         """The request's optional `transition` and `sweep` queries,
         parsed, with a 400 response already logged and built when either
@@ -194,7 +225,7 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     @app.get("/health")
     def health():
         _log_request(logger, "/health", NO_WRITES, "ok")
-        return jsonify({"ok": True, "version": __version__}), 200
+        return jsonify({"ok": True, "version": __version__, "monitor": monitor()}), 200
 
     @app.get("/moonhalo/on")
     def moonhalo_on():
@@ -212,14 +243,10 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
         try:
             state = model.turn_on(level, transition, sweep)
         except DdcError as error:
-            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 500
+            return ddc_failure(endpoint, error)
 
         _log_move_request(logger, endpoint, model, state["level"])
-        return (
-            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
-            200,
-        )
+        return ok_reply(state)
 
     @app.get("/moonhalo/off")
     def moonhalo_off():
@@ -231,14 +258,10 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
         try:
             state = model.turn_off(transition, sweep)
         except DdcError as error:
-            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 500
+            return ddc_failure(endpoint, error)
 
         _log_move_request(logger, endpoint, model, "off")
-        return (
-            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
-            200,
-        )
+        return ok_reply(state)
 
     @app.get("/moonhalo/brightness/<value>")
     def moonhalo_brightness(value: str):
@@ -256,14 +279,10 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
         try:
             state = model.set_level(level, transition, sweep)
         except DdcError as error:
-            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 500
+            return ddc_failure(endpoint, error)
 
         _log_move_request(logger, endpoint, model, level)
-        return (
-            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
-            200,
-        )
+        return ok_reply(state)
 
     @app.get("/moonhalo/colortemp/<value>")
     def moonhalo_colortemp(value: str):
@@ -282,20 +301,16 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
         try:
             state = model.set_colortemp(step, stage=stage, transition=transition, sweep=sweep)
         except DdcError as error:
-            _log_request(logger, endpoint, model.last_writes, f"error:{error}")
-            return jsonify({"ok": False, "error": str(error)}), 500
+            return ddc_failure(endpoint, error)
 
         _log_move_request(logger, endpoint, model, step)
-        return (
-            jsonify({"ok": True, "state": state, "transition": model.last_transition.to_dict()}),
-            200,
-        )
+        return ok_reply(state)
 
     @app.get("/moonhalo/status")
     def moonhalo_status():
         state = model.status()
         _log_request(logger, "/moonhalo/status", NO_WRITES, "ok")
-        return jsonify({"ok": True, "state": state}), 200
+        return jsonify({"ok": True, "state": state, "monitor": monitor()}), 200
 
     @app.errorhandler(404)
     def not_found(_error):

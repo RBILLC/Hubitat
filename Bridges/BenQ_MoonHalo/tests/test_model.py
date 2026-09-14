@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from moonhalo_bridge.config import DEFAULTS, Config, load_config
@@ -551,6 +552,109 @@ class TestMoonHaloModelStatePersistence(unittest.TestCase):
         # level is 0 only when power is "off"; with no remembered state and
         # power "unknown" it falls back to the configured default.
         self.assertEqual(state["level"], self.config.default_on_level)
+
+
+class LinkProbePort(FakeDdcPort):
+    """A FakeDdcPort that records the model's Monitor link as seen at the
+    moment each write is attempted, so a test can prove a failed D9 read
+    set the link `failed` before the write that follows it set it back
+    to `ok`. The model is attached after construction (`probe.model`);
+    `monitor_link` is a plain attribute read, so no lock is taken here."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model = None
+        self.links_at_write: list[str] = []
+
+    def write_vcp(self, code: int, value: int) -> None:
+        if self.model is not None:
+            self.links_at_write.append(self.model.monitor_link.link)
+        super().write_vcp(code, value)
+
+
+class TestMonitorLink(unittest.TestCase):
+    """Issue #39: the model records the outcome of its last DDC/CI call as
+    the **Monitor link** (`MoonHaloModel.monitor_link`): `unknown` until
+    the first call, `failed` with the error text and time after any
+    failure, `ok` after any success."""
+
+    OUTAGE_ERROR = "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_dir = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config = make_config(self.tmp_dir)
+
+    def test_fresh_model_is_unknown_with_null_error_and_time(self):
+        model = MoonHaloModel(FakeDdcPort(), self.config)
+        self.assertEqual(
+            model.monitor_link.to_dict(), {"link": "unknown", "error": None, "at": None}
+        )
+        model.status()  # performs no DDC/CI call
+        self.assertEqual(model.monitor_link.link, "unknown")
+
+    def test_successful_write_sets_ok_with_a_timestamp_and_no_error(self):
+        model = MoonHaloModel(FakeDdcPort(), self.config)
+        model.turn_on(50, transition=0)
+        link = model.monitor_link.to_dict()
+        self.assertEqual(link["link"], "ok")
+        self.assertIsNone(link["error"])
+        stamped = datetime.fromisoformat(link["at"])
+        self.assertIsNotNone(stamped.tzinfo)
+        self.assertLess(abs((datetime.now(timezone.utc) - stamped).total_seconds()), 5)
+
+    def test_failed_write_sets_failed_with_the_error_text_and_time(self):
+        model = MoonHaloModel(RaisingDdcPort(), self.config)
+        with self.assertRaises(DdcError):
+            model.turn_on(50, transition=0)
+        link = model.monitor_link.to_dict()
+        self.assertEqual(link["link"], "failed")
+        self.assertEqual(link["error"], "simulated hardware failure")
+        self.assertIsNotNone(datetime.fromisoformat(link["at"]).tzinfo)
+
+    def test_outage_error_text_is_carried_verbatim(self):
+        class OutagePort(FakeDdcPort):
+            # The 2026-09-14 outage: every D9 write failed with this exact
+            # error (the D7 on write that precedes it here is left to land).
+            def write_vcp(self, code: int, value: int) -> None:
+                if code == VCP_D9:
+                    raise DdcError(f"SetVCPFeature failed for VCP 0x{code:02X}", -1071241854)
+                super().write_vcp(code, value)
+
+        model = MoonHaloModel(OutagePort(), self.config)
+        with self.assertRaises(DdcError):
+            model.set_level(50, transition=0)
+        self.assertEqual(model.monitor_link.error, self.OUTAGE_ERROR)
+
+    def test_next_successful_call_flips_failed_back_to_ok(self):
+        port = FakeDdcPort()
+        model = MoonHaloModel(port, self.config)
+
+        def failing_write(code: int, value: int) -> None:
+            raise DdcError("simulated hardware failure")
+
+        port.write_vcp = failing_write
+        with self.assertRaises(DdcError):
+            model.turn_on(50, transition=0)
+        self.assertEqual(model.monitor_link.link, "failed")
+
+        del port.write_vcp  # back to the class's working write_vcp
+        model.turn_on(50, transition=0)
+        link = model.monitor_link.to_dict()
+        self.assertEqual(link["link"], "ok")
+        self.assertIsNone(link["error"])
+
+    def test_failed_resolving_d9_read_sets_failed_before_the_write_sets_ok(self):
+        port = LinkProbePort()
+        port.fail_reads[VCP_D9] = 3  # exhaust every retry of the resolving read
+        model = MoonHaloModel(port, self.config)
+        port.model = model
+        model.set_level(50, transition=0)  # no remembered colour step: reads D9 first
+        # The D7 on write and the D9 write both see the link the failed
+        # read left; the last of them then sets it ok.
+        self.assertEqual(port.links_at_write, ["failed", "failed"])
+        self.assertEqual(model.monitor_link.link, "ok")
 
 
 if __name__ == "__main__":

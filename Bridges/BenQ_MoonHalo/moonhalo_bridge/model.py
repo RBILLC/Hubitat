@@ -57,6 +57,14 @@ lit, so an on/brightness/colour command arriving mid dim-out must not
 repeat the relight sequence (that would flash) -- it just retargets the
 Ramp upward and D7 off is never written; the mirror case, an off arriving
 mid ramp-up, retargets down to a fresh D7 off instead of restarting.
+
+The **Monitor link** (issue #39, CONTEXT.md) is the outcome of the last
+DDC/CI call the model made, whatever it was: `unknown` until the first
+call after start-up, `failed` with the `DdcError` text and time after any
+failure, `ok` after any success. Every port call -- command writes, Ramp
+writes on the worker thread, the D9 reads that resolve an unknown step --
+goes through `_write_vcp_locked` / `_read_vcp_locked`, the one place it is
+recorded; `monitor_link` is what the HTTP layer puts in every reply.
 """
 from __future__ import annotations
 
@@ -65,6 +73,7 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -125,6 +134,42 @@ class Transition:
 
     def to_dict(self) -> dict[str, Any]:
         return {"seconds": self.seconds, "steps": self.steps}
+
+
+@dataclass(frozen=True)
+class MonitorLink:
+    """The Monitor link (issue #39): whether the Bridge could talk to the
+    monitor over DDC/CI on its last attempt. `link` is "unknown", "ok" or
+    "failed"; `error` is the `DdcError` text of the last failure (None
+    otherwise) and `at` the local time of the last attempt as ISO 8601
+    with offset (None before the first). `failed` says only that the last
+    attempt failed: a stuck link and DDC/CI switched off at the monitor
+    look the same from here."""
+
+    link: str
+    error: Optional[str]
+    at: Optional[str]
+
+    @classmethod
+    def unknown(cls) -> "MonitorLink":
+        return cls("unknown", None, None)
+
+    @classmethod
+    def ok(cls) -> "MonitorLink":
+        return cls("ok", None, _now_iso())
+
+    @classmethod
+    def failed(cls, error: DdcError) -> "MonitorLink":
+        return cls("failed", str(error), _now_iso())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"link": self.link, "error": self.error, "at": self.at}
+
+
+def _now_iso() -> str:
+    """Local time now, to the second, with the UTC offset: what a reply's
+    `monitor.at` carries and what the Driver formats for its state."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 @dataclass(frozen=True)
@@ -343,6 +388,36 @@ class MoonHaloModel:
         self._applied_colortemp_step: Optional[int] = self._state.colortemp_step
         self._ramp_plan: Optional[_RampPlan] = None
         self._worker_thread: Optional[threading.Thread] = None
+        #: Outcome of the last DDC/CI call (see the module docstring); one
+        #: immutable value swapped whole, so reading it needs no lock.
+        self._monitor_link: MonitorLink = MonitorLink.unknown()
+
+    @property
+    def monitor_link(self) -> MonitorLink:
+        """The Monitor link as of the last DDC/CI call, for every reply."""
+        return self._monitor_link
+
+    def _write_vcp_locked(self, code: int, value: int) -> None:
+        """The one path to `port.write_vcp`: records the Monitor link from
+        the outcome, then re-raises any `DdcError`. Caller holds `self._lock`."""
+        try:
+            self._port.write_vcp(code, value)
+        except DdcError as error:
+            self._monitor_link = MonitorLink.failed(error)
+            raise
+        self._monitor_link = MonitorLink.ok()
+
+    def _read_vcp_locked(self, code: int) -> tuple[int, int]:
+        """The one path to `port.read_vcp` (which retries internally):
+        records the Monitor link from the outcome, then re-raises any
+        `DdcError`. Caller holds `self._lock`."""
+        try:
+            result = self._port.read_vcp(code)
+        except DdcError as error:
+            self._monitor_link = MonitorLink.failed(error)
+            raise
+        self._monitor_link = MonitorLink.ok()
+        return result
 
     def _load_monitor_description(self) -> str:
         try:
@@ -481,7 +556,7 @@ class MoonHaloModel:
         harmless re-sync) and for a lit halo with an explicit `transition`
         of 0. No D9 write ever happens here, so the reply's Transition
         always reports zero steps. Caller holds `self._lock`."""
-        self._port.write_vcp(VCP_POWER, POWER_OFF_VALUE)
+        self._write_vcp_locked(VCP_POWER, POWER_OFF_VALUE)
         self.last_writes = [(VCP_POWER, POWER_OFF_VALUE)]
         self.last_transition = Transition(seconds=0.0, steps=0)
         self._state.power = "off"
@@ -528,7 +603,7 @@ class MoonHaloModel:
         though only one write happens here. `last_level`, when given,
         replaces the remembered Level. Caller holds `self._lock`."""
         d9_value = pack_d9(colortemp_step, brightness_step)
-        self._port.write_vcp(VCP_D9, d9_value)
+        self._write_vcp_locked(VCP_D9, d9_value)
         writes.append((VCP_D9, d9_value))
 
         self._applied_colortemp_step = colortemp_step
@@ -666,9 +741,9 @@ class MoonHaloModel:
             # Dark, with a Transition (issue #35): relight at the target
             # colour and brightness step 1 first, then Ramp up from there.
             d9_value = pack_d9(target_colortemp_step, 1)
-            self._port.write_vcp(VCP_D9, d9_value)
+            self._write_vcp_locked(VCP_D9, d9_value)
             writes.append((VCP_D9, d9_value))
-            self._port.write_vcp(VCP_POWER, POWER_ON_VALUE)
+            self._write_vcp_locked(VCP_POWER, POWER_ON_VALUE)
             writes.append((VCP_POWER, POWER_ON_VALUE))
             self._applied_colortemp_step = target_colortemp_step
             self._applied_brightness_step = 1
@@ -963,7 +1038,7 @@ class MoonHaloModel:
         `self._applied_colortemp_step`.
         """
         try:
-            self._port.write_vcp(vcp_code, value)
+            self._write_vcp_locked(vcp_code, value)
             return True
         except DdcError as error:
             if not is_final:
@@ -983,7 +1058,7 @@ class MoonHaloModel:
 
         time.sleep(DEFAULT_READ_RETRY_DELAY)
         try:
-            self._port.write_vcp(vcp_code, value)
+            self._write_vcp_locked(vcp_code, value)
             return True
         except DdcError as error:
             self._logger.error(
@@ -1042,7 +1117,7 @@ class MoonHaloModel:
         """Write D7 On and remember power "on" if not already on, appending
         the write to `writes`. Caller holds `self._lock`."""
         if self._state.power != "on":
-            self._port.write_vcp(VCP_POWER, POWER_ON_VALUE)
+            self._write_vcp_locked(VCP_POWER, POWER_ON_VALUE)
             writes.append((VCP_POWER, POWER_ON_VALUE))
             self._state.power = "on"
 
@@ -1088,7 +1163,7 @@ class MoonHaloModel:
         if remembered is not None:
             return remembered
         try:
-            current, _maximum = self._port.read_vcp(VCP_D9)
+            current, _maximum = self._read_vcp_locked(VCP_D9)
         except DdcError as error:
             self._logger.warning(
                 "D9 read failed after retries (%s); using default %s %d",

@@ -65,12 +65,30 @@ the Bridge announces its current LAN address to the Hub through the **Maker API*
 calls the Driver's `setBridgeAddress(ip, port)` command when it starts, every minute, and
 within a few seconds of its address changing. The Driver stores the announced address, shows it
 in the `bridgeAddress` attribute as `ip:port`, prefers it over the typed preferences, and marks
-`connectionState` offline when nothing has been heard from the Bridge for longer than the
+`bridgeLink` offline when nothing has been heard from the Bridge for longer than the
 announcement timeout (one warning in the log, then debug lines). Retyping the IP or port
 forgets the announced address until the next announcement; saving other preferences keeps it.
 The command is meant for the Bridge, but it can be run from the device page to point the
 Driver at an address by hand. The Maker API setup is described in the Bridge README's
 "Letting the Hub find the Bridge" section.
+
+#### Attributes and state variables
+
+- **`bridgeLink`** (`unknown`, `online`, `offline`) — whether the Hub could reach the Bridge on
+  its last attempt. Offline is how a MoonHalo whose PC is powered down is shown, like a bulb
+  with no power; `switch` and `level` keep their last values. Any reply from the Bridge, even a
+  500 reporting a failure, counts as online.
+- **`monitorLink`** (`unknown`, `ok`, `failed`) — whether the Bridge could talk to the monitor
+  over DDC/CI on its last attempt, taken from every reply including the status poll. One
+  warning in the log on the transition to failed, then debug lines, then an info line on
+  recovery; commands are always sent regardless. The Bridge README's troubleshooting table
+  lists what to check when it stays failed.
+- **`bridgeAddress`** — the `ip:port` the Bridge last announced.
+- State variables on the device page: `announcedIp` and `announcedPort` (the announced
+  address), `lastSeen` and `lastAnnounce` (readable times of the last reply and the last
+  announcement, with `lastSeenAt` and `lastAnnounceAt` as their epoch-millisecond twins for
+  the timeout arithmetic), `monitorLinkError` and `monitorLinkErrorAt` (the last DDC/CI error
+  text and its time), and `typedAddress` (the typed preferences, to notice a retype).
 
 The PC side — installing and running the Bridge itself, its configuration file, and its
 allowlist — is covered in [`Bridges/BenQ_MoonHalo/README.md`](Bridges/BenQ_MoonHalo/README.md).
