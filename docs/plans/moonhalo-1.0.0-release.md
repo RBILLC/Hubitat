@@ -58,6 +58,17 @@ Operating notes learned this session:
   the Bridge with no glossary entry. Either add the entries or reword.
 - `.gitignore`: the `tools/probe_state.json` pattern did not match `Bridges/BenQ_MoonHalo/tools/` (fixed
   alongside this plan); confirm the file no longer shows as untracked.
+- Driver preference renames, decided 2026-09-14 after #39 shipped (Driver 0.0.12): `timeoutSec` ->
+  `requestTimeoutSec` (it sits next to `announceTimeoutSec`), `ctMinKelvin` -> `warmKelvin` and
+  `ctMaxKelvin` -> `coolKelvin` (the titles already say warm and cool; "ct" is used nowhere else),
+  `pollMinutes` -> `pollIntervalMin` (the unit-suffix style of the other timed preferences). Kept:
+  `bridgeIp`/`bridgePort` (the state pair is `announcedIp`/`announcedPort` since 0.0.12),
+  `announceTimeoutSec`, `colorStaging`, `defaultTransitionMs`, `logEnable`/`txtEnable`. A renamed
+  preference is a new setting, so the value is retyped once and the old setting lingers: purge the four
+  old names on save with `device.removeSetting(name)` (Device Object page, next to `clearSetting` and
+  `updateSetting`) alongside `purgeStaleAttributes`. Update `updated()`'s log lines, the header comment
+  and the root README preference list. Ship as Driver 0.0.13 with a changelog line, before the 1.0.0
+  bump so only this hub pays the retype.
 - Versions: Driver header says "1.0.0 on public announcement". Bump the Driver to 1.0.0 with a changelog
   line, the Bridge `__version__` to 1.0.0, the README `/health` example, and the Driver's "Version" line;
   restart the Bridge task and re-import the Driver on the hub.
