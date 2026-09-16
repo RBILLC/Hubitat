@@ -76,6 +76,12 @@ then [#41](https://github.com/RBILLC/Hubitat/issues/41) (Driver 0.0.14: the item
 detection glossary entry for #40's rule names), blocked by #42 on GitHub. The 1.0.0 bump is a separate
 step after the review pass.
 
+Status 2026-09-16 night: #42 implemented on `main` (Driver 0.0.13: `markOffline` sets `monitorLink`
+`unreachable` in the same batch, `applyMonitorLink` restores it from the first reply; root README,
+Driver header and Bridge README updated). Awaiting the user's hub check: re-import the Driver, stop
+and start the Bridge task, confirm `bridgeLink offline` and `monitorLink unreachable` together, then
+`ok`/`failed` on the next poll with no command sent.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping

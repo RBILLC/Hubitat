@@ -21,9 +21,11 @@
  *   whose PC is off, like a bulb with no power; switch and level keep their
  *   last values. Any reply from the Bridge, a 500 included, is online.
  * - monitorLink: whether the Bridge could talk to the monitor over DDC/CI on
- *   its last attempt (ok, failed, unknown), from the monitor object of every
- *   reply; the last error text and time are kept in state. Commands are
- *   always sent whatever it says.
+ *   its last attempt (ok, failed, unknown, unreachable), from the monitor
+ *   object of every reply; the last error text and time are kept in state.
+ *   Commands are always sent whatever it says. unreachable is set here while
+ *   bridgeLink is offline: the Bridge's last word is not current. The first
+ *   reply restores it.
  * - Attribute events come only from the state in the Bridge's reply.
  * - setLevel's rate and setColorTemperature's tt go to the Bridge as
  *   transition (seconds; 0 snaps); without one, the Default transition
@@ -41,10 +43,13 @@
  *   epoch twins lastSeenAt/lastAnnounceAt for the timeout arithmetic;
  *   monitorLinkError/monitorLinkErrorAt.
  *
- * Version: 0.0.12 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * Version: 0.0.13 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
  * and only moves when it changes; /health reports its number.
  *
  * Changelog:
+ * 2026-09-16 0.0.13 - monitorLink reads unreachable while bridgeLink is offline, set in the same
+ *                     event batch and restored by the first Bridge reply; monitorLinkError and
+ *                     monitorLinkErrorAt are untouched (issue #42)
  * 2026-09-14 0.0.12 - bridgeLink replaces connectionState; monitorLink from the Bridge's monitor
  *                     object; a 500 keeps bridgeLink online; readable lastSeen/lastAnnounce and
  *                     announcedIp/announcedPort state (issue #39)
@@ -93,7 +98,7 @@ metadata {
 
 
         attribute "bridgeLink", "enum", ["unknown", "online", "offline"]
-        attribute "monitorLink", "enum", ["unknown", "ok", "failed"]
+        attribute "monitorLink", "enum", ["unknown", "ok", "failed", "unreachable"]
         attribute "bridgeAddress", "string"
 
         command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware colour temperature step, 1 (warm) to 7 (cool)"]]
@@ -620,6 +625,16 @@ private void markOffline(String reason) {
     } else {
         logDebug "Bridge link still offline (${reason})"
     }
+    markMonitorUnreachable()
+}
+
+// The Bridge cannot be asked, so its last word about the monitor is not
+// current. monitorLinkError/monitorLinkErrorAt stay; the first reply restores.
+private void markMonitorUnreachable() {
+    String name = device.displayName
+    if (device.currentValue("monitorLink", true) == "unreachable") return
+    log.info "${name}: Monitor link unreachable"
+    sendEvent(name: "monitorLink", value: "unreachable", descriptionText: "${name} monitorLink was set to unreachable")
 }
 
 private void markOnline() {
