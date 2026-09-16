@@ -91,7 +91,11 @@ Driver at an address by hand. The Maker API setup is described in the Bridge REA
   address), `lastSeen` and `lastAnnounce` (readable times of the last reply and the last
   announcement, with `lastSeenAt` and `lastAnnounceAt` as their epoch-millisecond twins for
   the timeout arithmetic), `monitorLinkError` and `monitorLinkErrorAt` (the last DDC/CI error
-  text and its time), and `typedAddress` (the typed preferences, to notice a retype).
+  text and its time), `bridgeVersion` (the version the Bridge last reported, from every reply
+  including the status poll; a Bridge older than the Driver needs, or one from before 0.0.9
+  that sends no version, reads `0.0.8 (Driver needs 0.0.9 or later)` or `unknown (Driver needs
+  0.0.9 or later)` with one warning in the log; a newer Bridge is never flagged), and
+  `typedAddress` (the typed preferences, to notice a retype).
 
 The PC side — installing and running the Bridge itself, its configuration file, and its
 allowlist — is covered in [`Bridges/BenQ_MoonHalo/README.md`](Bridges/BenQ_MoonHalo/README.md).

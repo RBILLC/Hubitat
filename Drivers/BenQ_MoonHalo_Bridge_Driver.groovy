@@ -10,8 +10,8 @@
  * 1000 or more is Kelvin) and /moonhalo/status; the first four also take
  * transition=<seconds> or sweep=<seconds>. Each reply is
  * {"ok": true, "state": {power, level, brightnessStep, colorTemperature,
- * colorTempStep, monitor}, "monitor": {link, error, at}} or
- * {"ok": false, "error": "...", "monitor": {...}}.
+ * colorTempStep, monitor}, "version": "x.y.z", "monitor": {link, error, at}}
+ * or {"ok": false, "error": "...", "version": "x.y.z", "monitor": {...}}.
  *
  * Author: RBILLC
  * Import URL: https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy
@@ -26,6 +26,10 @@
  *   Commands are always sent whatever it says. unreachable is set here while
  *   bridgeLink is offline: the Bridge's last word is not current. The first
  *   reply restores it.
+ * - bridgeVersion (state): the version field of every reply, a 500 included.
+ *   Older than MIN_BRIDGE_VERSION, or missing (Bridge 0.0.8 and earlier), is
+ *   shown in place as "0.0.8 (Driver needs 0.0.9 or later)" with one warning;
+ *   newer is never flagged. Retyping the address clears it.
  * - Attribute events come only from the state in the Bridge's reply.
  * - setLevel's rate and setColorTemperature's tt go to the Bridge as
  *   transition (seconds; 0 snaps); without one, the Default transition
@@ -41,12 +45,17 @@
  *   Retyping the IP or port forgets the announced address.
  * - State: announcedIp/announcedPort; lastSeen/lastAnnounce readable, with
  *   epoch twins lastSeenAt/lastAnnounceAt for the timeout arithmetic;
- *   monitorLinkError/monitorLinkErrorAt.
+ *   monitorLinkError/monitorLinkErrorAt; bridgeVersion.
  *
- * Version: 0.0.13 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
- * and only moves when it changes; /health reports its number.
+ * Version: 0.0.14 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
+ * and only moves when it changes; every reply reports its number (bridgeVersion).
+ * Minimum Bridge version: 0.0.9 (MIN_BRIDGE_VERSION below). It moves only when the Driver starts
+ * reading something an older Bridge does not send, never on a Bridge release alone.
  *
  * Changelog:
+ * 2026-09-16 0.0.14 - bridgeVersion state from the version field of every reply, checked against
+ *                     the minimum Bridge version 0.0.9: too old or missing is shown in place with
+ *                     one warning, newer is never flagged (issue #43)
  * 2026-09-16 0.0.13 - monitorLink reads unreachable while bridgeLink is offline, set in the same
  *                     event batch and restored by the first Bridge reply; monitorLinkError and
  *                     monitorLinkErrorAt are untouched (issue #42)
@@ -86,6 +95,11 @@
  *                    docs use Bulb (issue #21)
  * 2026-09-04 0.0.0 - Initial pre-release (issue #19)
  */
+
+import groovy.transform.Field
+
+// Oldest Bridge this Driver reads; see the header's Version paragraph.
+@Field static final String MIN_BRIDGE_VERSION = "0.0.9"
 
 metadata {
     definition (name: "BenQ MoonHalo Bridge", namespace: "rbillc", author: "RBILLC", importUrl: "https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy") {
@@ -169,7 +183,7 @@ private void forgetAnnouncedAddressIfTypedChanged() {
     if (state.announcedIp != null || state.announcedPort != null) {
         logDebug "typed address changed to ${typed}; announced address ${state.announcedIp}:${state.announcedPort} forgotten until the next announcement"
     }
-    ["announcedIp", "announcedPort", "lastAnnounceAt", "lastAnnounce", "lastSeenAt", "lastSeen"].each { String key ->
+    ["announcedIp", "announcedPort", "lastAnnounceAt", "lastAnnounce", "lastSeenAt", "lastSeen", "bridgeVersion"].each { String key ->
         state.remove(key)
     }
 }
@@ -465,6 +479,7 @@ void bridgeCallback(resp, data) {
 
         markOnline()
         applyMonitorLink(json.get("monitor"))
+        applyBridgeVersion(json.get("version"))
         if (json.get("ok") != true) {
             log.warn "${device.displayName}: Bridge rejected ${command}: ${json.get('error') ?: 'no error given'}"
             return
@@ -611,6 +626,50 @@ private void applyMonitorLink(Object monitor) {
     if (changed) {
         sendEvent(name: "monitorLink", value: value, descriptionText: "${name} monitorLink was set to ${value}")
     }
+}
+
+// bridgeVersion from a reply's version field. Below MIN_BRIDGE_VERSION, or
+// absent (Bridge 0.0.8 and earlier), it is shown in place with one warning on
+// the transition, debug on repeats; one info line when the value changes.
+private void applyBridgeVersion(Object version) {
+    String reported = version?.toString()?.trim() ?: "unknown"
+    Boolean tooOld = !isVersionAtLeast(reported, MIN_BRIDGE_VERSION)
+    String shown = tooOld ? "${reported} (Driver needs ${MIN_BRIDGE_VERSION} or later)" : reported
+    if (state.bridgeVersion?.toString() == shown) {
+        if (tooOld) logDebug "Bridge version still ${shown}"
+        return
+    }
+    state.bridgeVersion = shown
+    if (tooOld) {
+        log.warn "${device.displayName}: Bridge version ${shown}"
+    } else {
+        log.info "${device.displayName}: Bridge version ${shown}"
+    }
+}
+
+// Dotted versions compared numerically per segment (0.0.10 is newer than
+// 0.0.9); missing segments count as 0; an unparsable version is never enough.
+private Boolean isVersionAtLeast(String version, String minimum) {
+    List<Integer> have = versionSegments(version)
+    List<Integer> need = versionSegments(minimum)
+    if (have == null || need == null) return false
+    int length = Math.max(have.size(), need.size())
+    for (int i = 0; i < length; i++) {
+        Integer a = (i < have.size()) ? have[i] : 0
+        Integer b = (i < need.size()) ? need[i] : 0
+        if (a != b) return a > b
+    }
+    return true
+}
+
+private List<Integer> versionSegments(String version) {
+    if (!version) return null
+    List<Integer> segments = []
+    for (String part in version.split("\\.")) {
+        if (!part.isInteger()) return null
+        segments << part.toInteger()
+    }
+    return segments
 }
 
 // Offline is how a MoonHalo whose PC is powered down is shown. The warning

@@ -5,5 +5,6 @@ hands-on DDC access (`monitors`/`read`/`write`) and serving the HTTP bridge
 (`serve`).
 """
 
-#: Bridge version, kept in lockstep with the Driver's header version.
-__version__ = "0.0.8"
+#: Bridge version, sent as `version` in every reply (issue #43). Versioned
+#: separately from the Driver; moves only when the Bridge changes.
+__version__ = "0.0.9"
