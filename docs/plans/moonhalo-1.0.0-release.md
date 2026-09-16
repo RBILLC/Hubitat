@@ -72,15 +72,22 @@ Two tickets, filed 2026-09-16, both ready-for-agent, one Driver version each so 
 reviewed on its own: [#42](https://github.com/RBILLC/Hubitat/issues/42) first (Driver 0.0.13:
 `monitorLink` gains a fourth value, `unreachable`, set when `bridgeLink` goes offline and restored by
 the first Bridge reply; options set aside: `unknown`, keep the last word, a `monitorLinkAt` timestamp),
-then [#41](https://github.com/RBILLC/Hubitat/issues/41) (Driver 0.0.14: the items below plus a Monitor
+then [#41](https://github.com/RBILLC/Hubitat/issues/41) (Driver 0.0.15 since #43 took 0.0.14: the items below plus a Monitor
 detection glossary entry for #40's rule names), blocked by #42 on GitHub. The 1.0.0 bump is a separate
 step after the review pass.
 
-Status 2026-09-16 night: #42 implemented on `main` (Driver 0.0.13: `markOffline` sets `monitorLink`
-`unreachable` in the same batch, `applyMonitorLink` restores it from the first reply; root README,
-Driver header and Bridge README updated). Awaiting the user's hub check: re-import the Driver, stop
-and start the Bridge task, confirm `bridgeLink offline` and `monitorLink unreachable` together, then
-`ok`/`failed` on the next poll with no command sent.
+Status 2026-09-16 night: #42 shipped as 4118c84 (Driver 0.0.13) and closed after the hub check passed
+(task stopped: `bridgeLink offline` and `monitorLink unreachable` together; task started: restored on
+the next poll). The check raised two points, decided the same evening:
+
+- [#43](https://github.com/RBILLC/Hubitat/issues/43) (ready-for-agent, Driver 0.0.14 / Bridge 0.0.9):
+  every Bridge reply carries `version` next to `monitor`, and the Driver keeps it as a `bridgeVersion`
+  state variable, so the hub shows which Bridge it talks to once users manage both pieces. Options set
+  aside: the Driver polling `/health`; a mismatch warning (later); an attribute (Google Home typing).
+- The `monitorLinkError`/`monitorLinkErrorAt` state is history by design (kept across recovery) and
+  stays; the names are the problem, so #41 renames them to `lastMonitorError`/`lastMonitorErrorAt`.
+
+Order is now #43, then #41 (Driver 0.0.15, blocked by #43 on GitHub), then the 1.0.0 bump.
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
