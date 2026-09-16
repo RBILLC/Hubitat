@@ -68,11 +68,13 @@ invisible to DDC/CI (writes succeed, D6 reads 0x60 on and off), so no `standby` 
 
 ## Step 2: code clean-up before announcing
 
-Ticket [#41](https://github.com/RBILLC/Hubitat/issues/41) (ready-for-agent, filed 2026-09-16) carries the
-items below plus two decided that evening: `monitorLink` gains a fourth value, `unreachable`, set when
-`bridgeLink` goes offline and restored by the first Bridge reply (options set aside: `unknown`, keep the
-last word, a `monitorLinkAt` timestamp); and a Monitor detection glossary entry for #40's rule names.
-Driver 0.0.13 first; the 1.0.0 bump is a separate step after the review pass.
+Two tickets, filed 2026-09-16, both ready-for-agent, one Driver version each so each ships and is
+reviewed on its own: [#42](https://github.com/RBILLC/Hubitat/issues/42) first (Driver 0.0.13:
+`monitorLink` gains a fourth value, `unreachable`, set when `bridgeLink` goes offline and restored by
+the first Bridge reply; options set aside: `unknown`, keep the last word, a `monitorLinkAt` timestamp),
+then [#41](https://github.com/RBILLC/Hubitat/issues/41) (Driver 0.0.14: the items below plus a Monitor
+detection glossary entry for #40's rule names), blocked by #42 on GitHub. The 1.0.0 bump is a separate
+step after the review pass.
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
