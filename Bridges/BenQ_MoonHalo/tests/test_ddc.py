@@ -72,17 +72,19 @@ class TestFakeDdcPortBasics(unittest.TestCase):
 class TestReadRetryBehaviour(unittest.TestCase):
     """The retry wrapper is shared code exercised here through FakeDdcPort,
     per the ticket's acceptance criteria for the port wrapper's retry
-    behaviour."""
+    behaviour. A selector is set so monitor detection (issue #40), whose
+    own D9 read would otherwise consume the scripted failures, stays out
+    of the way."""
 
     def test_succeeds_after_transient_failures_within_retry_budget(self):
-        port = FakeDdcPort(registers={0xD9: (1, 10)}, retry_delay=0.0)
+        port = FakeDdcPort(registers={0xD9: (1, 10)}, retry_delay=0.0, monitor_selector="DRYRUN1")
         port.fail_reads[0xD9] = 2  # fails twice, succeeds on the 3rd attempt
         current, maximum = port.read_vcp(0xD9)
         self.assertEqual((current, maximum), (1, 10))
         self.assertEqual(port.fail_reads[0xD9], 0)
 
     def test_raises_after_exhausting_all_three_attempts(self):
-        port = FakeDdcPort(registers={0xD9: (1, 10)}, retry_delay=0.0)
+        port = FakeDdcPort(registers={0xD9: (1, 10)}, retry_delay=0.0, monitor_selector="DRYRUN1")
         port.fail_reads[0xD9] = 5  # more failures than the retry budget
         with self.assertRaises(DdcError):
             port.read_vcp(0xD9)
@@ -96,21 +98,23 @@ class TestReadRetryBehaviour(unittest.TestCase):
 
 class TestFakeDdcPortCapabilities(unittest.TestCase):
     def test_read_capabilities_returns_the_configured_string(self):
-        port = FakeDdcPort(capabilities="(prot(monitor)...)", retry_delay=0.0)
-        self.assertEqual(port.read_capabilities(), "(prot(monitor)...)")
+        port = FakeDdcPort(capabilities="(prot(monitor)model(RD280UG))", retry_delay=0.0)
+        self.assertEqual(port.read_capabilities(), "(prot(monitor)model(RD280UG))")
 
-    def test_default_capabilities_is_empty_string(self):
+    def test_default_capabilities_name_the_rd280ug(self):
+        # So a bare FakeDdcPort() is detected by model (issue #40) like the
+        # real monitor is.
         port = FakeDdcPort(retry_delay=0.0)
-        self.assertEqual(port.read_capabilities(), "")
+        self.assertIn("model(RD280UG)", port.read_capabilities())
 
     def test_succeeds_after_transient_capabilities_failures(self):
-        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0)
+        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0, monitor_selector="DRYRUN1")
         port.fail_capabilities = 2  # fails twice, succeeds on the 3rd attempt
         self.assertEqual(port.read_capabilities(), "(vcp(D9))")
         self.assertEqual(port.fail_capabilities, 0)
 
     def test_raises_after_exhausting_all_three_capabilities_attempts(self):
-        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0)
+        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0, monitor_selector="DRYRUN1")
         port.fail_capabilities = 5  # more failures than the retry budget
         with self.assertRaises(DdcError):
             port.read_capabilities()

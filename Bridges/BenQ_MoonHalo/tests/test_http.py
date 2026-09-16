@@ -14,7 +14,7 @@ from pathlib import Path
 
 from moonhalo_bridge.access import FakeArpTable
 from moonhalo_bridge.config import Config
-from moonhalo_bridge.ddc import DdcError, FakeDdcPort
+from moonhalo_bridge.ddc import DdcError, FakeDdcPort, FakeMonitor, MonitorInfo
 from moonhalo_bridge.http import create_app
 from moonhalo_bridge.model import (
     POWER_OFF_VALUE,
@@ -1783,9 +1783,9 @@ class TestMonitorLinkReplies(HttpTestCase):
         self.assertIsNone(body["monitor"]["error"])
         self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"]["link"], "ok")
 
-    def test_state_still_carries_the_monitor_description(self):
+    def test_state_still_carries_the_monitor_label(self):
         body = self.client.get("/moonhalo/status").get_json()
-        self.assertEqual(body["state"]["monitor"], "Generic PnP Monitor")
+        self.assertEqual(body["state"]["monitor"], "RD280UG on DRYRUN1")
 
 
 class TestMonitorLinkOnRampWrites(HttpTestCase):
@@ -1846,6 +1846,99 @@ class TestMonitorLinkOnRampWrites(HttpTestCase):
         # ... and the successful writes after it set it ok again
         self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"]["link"], "ok")
 
+
+
+class TestMonitorDetectionOverHttp(unittest.TestCase):
+    """Issue #40, as the Hub sees it: with two monitors of one description
+    where the primary is not the RD280UG, writes reach the RD280UG and
+    `state.monitor` names it; with no RD280UG attached a command gets a
+    500 whose Monitor link names the model looked for and the models
+    seen, and `/moonhalo/status` reports the same; a display set that
+    changes between calls is detected afresh on the next call."""
+
+    DISPLAY1 = "\\\\.\\DISPLAY1"
+    DISPLAY2 = "\\\\.\\DISPLAY2"
+    GENERIC = "Generic PnP Monitor"
+
+    @classmethod
+    def rd280ug(cls, device_name: str, primary: bool = False) -> FakeMonitor:
+        return FakeMonitor(
+            MonitorInfo(device_name=device_name, primary=primary, description=cls.GENERIC),
+            registers={VCP_D9: (0x0101, 0x070A), VCP_POWER: (0x0230, 0x0231)},
+            capabilities="(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))",
+        )
+
+    @classmethod
+    def pd2700u(cls, device_name: str, primary: bool = False) -> FakeMonitor:
+        return FakeMonitor(
+            MonitorInfo(device_name=device_name, primary=primary, description=cls.GENERIC),
+            registers={VCP_D9: (0, 0)},
+            capabilities="(prot(monitor)type(LCD)model(PD2700U)vcp(10 12))",
+        )
+
+    def build(self, monitors: list[FakeMonitor], **config_overrides):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort(monitors=monitors, monitor_selector=config_overrides.pop("monitor_selector", None))
+        self.config = make_config(Path(self._tmp.name), **config_overrides)
+        self.model = MoonHaloModel(self.port, self.config)
+        app = create_app(self.model, self.config)
+        app.testing = True
+        self.client = app.test_client()
+
+    def test_writes_go_to_the_rd280ug_not_the_primary(self):
+        self.build([self.pd2700u(self.DISPLAY2, primary=True), self.rd280ug(self.DISPLAY1)])
+        body = self.client.get("/moonhalo/brightness/50?transition=0").get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["state"]["monitor"], f"RD280UG on {self.DISPLAY1}")
+        self.assertEqual(body["monitor"]["link"], "ok")
+        self.assertEqual(
+            self.port.monitor(self.DISPLAY1).writes,
+            [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, pack_d9(1, 5))],  # colour step 1 read from its D9
+        )
+        self.assertEqual(self.port.monitor(self.DISPLAY2).writes, [])
+        status = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(status["state"]["monitor"], f"RD280UG on {self.DISPLAY1}")
+
+    def test_no_rd280ug_gives_a_500_naming_the_models_and_status_agrees(self):
+        self.build([self.pd2700u(self.DISPLAY2, primary=True)])
+        response = self.client.get("/moonhalo/on?transition=0")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        expected = f"no monitor with model RD280UG among: PD2700U ({self.DISPLAY2})"
+        self.assertEqual(body["error"], expected)
+        self.assertEqual(body["monitor"]["link"], "failed")
+        self.assertEqual(body["monitor"]["error"], expected)
+        self.assertEqual(self.port.writes, [])
+        status = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(status["monitor"]["link"], "failed")
+        self.assertEqual(status["monitor"]["error"], expected)
+        self.assertEqual(status["state"]["monitor"], "unknown")
+
+    def test_a_display_set_change_is_detected_on_the_next_call(self):
+        self.build([self.pd2700u(self.DISPLAY2, primary=True), self.rd280ug(self.DISPLAY1)])
+        self.assertTrue(self.client.get("/moonhalo/brightness/50?transition=0").get_json()["ok"])
+        # The RD280UG's cable is pulled.
+        del self.port.fake_monitors[1]
+        response = self.client.get("/moonhalo/brightness/60?transition=0")
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("no monitor with model RD280UG", response.get_json()["error"])
+        # And plugged into another port.
+        self.port.fake_monitors.append(self.rd280ug(self.DISPLAY2.replace("2", "3")))
+        body = self.client.get("/moonhalo/brightness/60?transition=0").get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["state"]["monitor"], "RD280UG on " + self.DISPLAY2.replace("2", "3"))
+        self.assertEqual(body["monitor"]["link"], "ok")
+
+    def test_selector_skips_detection_and_names_the_description(self):
+        first, second = self.pd2700u(self.DISPLAY2, primary=True), self.rd280ug(self.DISPLAY1)
+        first.fail_capabilities = second.fail_capabilities = 99  # detection would find nothing
+        self.build([first, second], monitor_selector="DISPLAY1")
+        body = self.client.get("/moonhalo/brightness/50?transition=0").get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["state"]["monitor"], f"{self.GENERIC} on {self.DISPLAY1}")
+        self.assertEqual(len(self.port.monitor(self.DISPLAY1).writes), 2)
 
 if __name__ == "__main__":
     unittest.main()

@@ -92,13 +92,36 @@ class TestBuildParser(unittest.TestCase):
 
 
 class TestDryRunMonitors(unittest.TestCase):
-    def test_lists_the_preloaded_monitor(self):
+    def test_lists_the_preloaded_monitor_and_the_selection(self):
         out = io.StringIO()
         exit_code = main(["--dry-run", "monitors"], out=out)
         self.assertEqual(exit_code, 0)
         output = out.getvalue()
         self.assertIn("Generic PnP Monitor", output)
         self.assertIn("primary=True", output)
+        self.assertIn("selected: RD280UG on DRYRUN1 (by model)", output)
+
+    def test_selector_option_names_the_rule(self):
+        out = io.StringIO()
+        exit_code = main(["--dry-run", "--monitor", "dryrun", "monitors"], out=out)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("selected: Generic PnP Monitor on DRYRUN1 (by selector)", out.getvalue())
+
+    def test_selector_matching_nothing_is_reported_and_fails_a_read(self):
+        out = io.StringIO()
+        self.assertEqual(main(["--dry-run", "--monitor", "nope", "monitors"], out=out), 0)
+        self.assertIn("selected: none (no monitor matches selector 'nope'", out.getvalue())
+        self.assertEqual(main(["--dry-run", "--monitor", "nope", "read", "D9"], out=io.StringIO()), 1)
+
+    def test_no_matching_model_is_reported(self):
+        port = make_dry_run_port()
+        port.capabilities = "(prot(monitor)type(LCD)model(PD2700U)vcp(10))"
+        out = io.StringIO()
+        with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
+            self.assertEqual(main(["--dry-run", "monitors"], out=out), 0)
+        self.assertIn(
+            "selected: none (no monitor with model RD280UG among: PD2700U (DRYRUN1))", out.getvalue()
+        )
 
 
 class TestDryRunRead(unittest.TestCase):
@@ -138,6 +161,7 @@ class TestDryRunCapabilities(unittest.TestCase):
 
     def test_recovers_from_transient_capabilities_failures(self):
         port = make_dry_run_port()
+        port.resolve_target()  # detection (issue #40) done; the failures below are the read's
         port.fail_capabilities = 2  # fails twice, succeeds on the 3rd attempt
         out = io.StringIO()
         with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
@@ -147,6 +171,7 @@ class TestDryRunCapabilities(unittest.TestCase):
 
     def test_exhausted_retries_report_error_and_exit_1(self):
         port = make_dry_run_port()
+        port.resolve_target()  # detection (issue #40) done; the failures below are the read's
         port.fail_capabilities = 3  # exceeds the retry budget
         out = io.StringIO()
         with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):

@@ -286,9 +286,10 @@ class TestMoonHaloModelPower(unittest.TestCase):
             {"power", "level", "brightnessStep", "colorTemperature", "colorTempStep", "monitor"},
         )
 
-    def test_monitor_description_from_list_monitors(self):
+    def test_monitor_names_the_detected_model_and_device(self):
+        # Issue #40: the port's detection label, not the description.
         state = self.model.status()
-        self.assertEqual(state["monitor"], "Generic PnP Monitor")
+        self.assertEqual(state["monitor"], "RD280UG on DRYRUN1")
 
     def test_monitor_unknown_when_no_monitors(self):
         class NoMonitorsPort(FakeDdcPort):
