@@ -82,8 +82,11 @@ the next poll). The check raised two points, decided the same evening:
 
 - [#43](https://github.com/RBILLC/Hubitat/issues/43) (ready-for-agent, Driver 0.0.14 / Bridge 0.0.9):
   every Bridge reply carries `version` next to `monitor`, and the Driver keeps it as a `bridgeVersion`
-  state variable, so the hub shows which Bridge it talks to once users manage both pieces. Options set
-  aside: the Driver polling `/health`; a mismatch warning (later); an attribute (Google Home typing).
+  state variable, so the hub shows which Bridge it talks to once users manage both pieces. The Driver
+  also carries the minimum Bridge version it needs (0.0.9) and shows a too-old or missing version in
+  place (`0.0.8 (Driver needs 0.0.9 or later)`) with one warning; newer is never flagged, and the
+  minimum moves only when the Driver reads something an older Bridge does not send. Options set aside:
+  the Driver polling `/health`; checking against the latest release; an attribute (Google Home typing).
 - The `monitorLinkError`/`monitorLinkErrorAt` state is history by design (kept across recovery) and
   stays; the names are the problem, so #41 renames them to `lastMonitorError`/`lastMonitorErrorAt`.
 
