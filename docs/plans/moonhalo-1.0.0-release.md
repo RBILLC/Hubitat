@@ -47,6 +47,17 @@ Operating notes learned this session:
   page; that is why the preference is whole milliseconds on a `number` input (research note, section 11
   of `docs/research/hubitat-driver-facilities.md`).
 
+## Step 1b: Bridge 0.0.8, pick the monitor by identity (#40, added 2026-09-16)
+
+A second monitor (BenQ PD2700U) became Windows' primary display and the Bridge, selecting the
+primary when `monitor_selector` is null, wrote the MoonHalo registers to it while every link read
+healthy. Ticket [#40](https://github.com/RBILLC/Hubitat/issues/40) (ready-for-agent) makes the Bridge
+detect the RD280UG by the `model(...)` in its capabilities string, with a D9 probe as fallback and
+tie-breaker, and report `failed` when it is absent. Workaround meanwhile: `"monitor_selector":
+"DISPLAY1"` in the live config. Do this before Step 2, which touches the same README rows.
+Related facts recorded in `docs/research/rd280ug-d6-power-mode.md`: the RD280UG's button standby is
+invisible to DDC/CI (writes succeed, D6 reads 0x60 on and off), so no `standby` value is possible.
+
 ## Step 2: code clean-up before announcing
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
