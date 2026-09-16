@@ -135,7 +135,9 @@ success reply and the 500 body of a failed command -- carries the **Monitor link
 `monitor` object: whether the Bridge could talk to the monitor over DDC/CI on its last attempt,
 whatever that attempt was (a command write, a Ramp write on the worker thread, or the D9 read
 that resolves an unknown step). The Driver shows it as `monitorLink` and its status poll picks
-it up without sending a command, which is how a failed Monitor link is seen from the Hub.
+it up without sending a command, which is how a failed Monitor link is seen from the Hub. The
+Driver's fourth value, `unreachable`, is its own reading while the Bridge link is offline; the
+Bridge never sends it.
 
 | Field | Meaning |
 |---|---|
