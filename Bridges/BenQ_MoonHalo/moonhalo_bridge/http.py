@@ -6,10 +6,12 @@ hook enforces the access-control allowlists (`allowed_macs`, `allowed_ips`,
 `allow_loopback`) from `config` on every path except `/health`.
 
 Every reply the model had a hand in -- `/moonhalo/status`, `/health`,
-each success reply and the 500 body of a failed command -- carries the
-**Monitor link** (issue #39) as one `monitor` object, `{"link", "error",
-"at"}` from `model.monitor_link`, so the Driver's status poll sees a failed
-Monitor link without sending a command.
+each success reply and the 500 body of a failed command -- is built by one
+`envelope` helper and so carries the Bridge `version` (issue #43; the
+Driver shows it as `bridgeVersion`) and the **Monitor link** (issue #39)
+as one `monitor` object, `{"link", "error", "at"}` from
+`model.monitor_link`, so the Driver's status poll sees a failed Monitor
+link, and which Bridge answered, without sending a command.
 """
 from __future__ import annotations
 
@@ -187,26 +189,23 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
         """The Monitor link object every model-backed reply carries."""
         return model.monitor_link.to_dict()
 
+    def envelope(**fields: Any) -> dict[str, Any]:
+        """The body of every model-backed reply: the caller's fields plus
+        the Bridge version (issue #43; the Driver shows it as
+        `bridgeVersion`) and the Monitor link, so neither can be missed
+        on one path."""
+        return {**fields, "version": __version__, "monitor": monitor()}
+
     def ok_reply(state: dict[str, Any]):
         """The 200 body of on/off/brightness/colortemp: state, the
-        Transition applied, and the Monitor link."""
-        return (
-            jsonify(
-                {
-                    "ok": True,
-                    "state": state,
-                    "transition": model.last_transition.to_dict(),
-                    "monitor": monitor(),
-                }
-            ),
-            200,
-        )
+        Transition applied, the Bridge version and the Monitor link."""
+        return jsonify(envelope(ok=True, state=state, transition=model.last_transition.to_dict())), 200
 
     def ddc_failure(endpoint: str, error: DdcError):
         """The 500 body of a command whose DDC/CI call failed: the error
-        text and the Monitor link the failure just set."""
+        text, the Bridge version and the Monitor link the failure just set."""
         _log_request(logger, endpoint, model.last_writes, f"error:{error}")
-        return jsonify({"ok": False, "error": str(error), "monitor": monitor()}), 500
+        return jsonify(envelope(ok=False, error=str(error))), 500
 
     def pacing_queries(endpoint: str):
         """The request's optional `transition` and `sweep` queries,
@@ -225,7 +224,7 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     @app.get("/health")
     def health():
         _log_request(logger, "/health", NO_WRITES, "ok")
-        return jsonify({"ok": True, "version": __version__, "monitor": monitor()}), 200
+        return jsonify(envelope(ok=True)), 200
 
     @app.get("/moonhalo/on")
     def moonhalo_on():
@@ -310,7 +309,7 @@ def create_app(model: MoonHaloModel, config: Config, arp: Optional[ArpTable] = N
     def moonhalo_status():
         state = model.status()
         _log_request(logger, "/moonhalo/status", NO_WRITES, "ok")
-        return jsonify({"ok": True, "state": state, "monitor": monitor()}), 200
+        return jsonify(envelope(ok=True, state=state)), 200
 
     @app.errorhandler(404)
     def not_found(_error):

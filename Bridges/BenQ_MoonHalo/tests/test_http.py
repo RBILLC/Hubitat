@@ -1436,6 +1436,13 @@ class TestMoonHaloStatus(HttpTestCase):
         )
         self.assertEqual(self.port.writes, [])
 
+    def test_status_carries_the_bridge_version(self):
+        # Issue #43: the Driver keeps it as bridgeVersion, so the status
+        # poll alone tells the hub which Bridge it talks to.
+        body = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(body["version"], __version__)
+        self.assertRegex(body["version"], r"^\d+\.\d+\.\d+$")
+
     def test_status_reflects_prior_on(self):
         # transition=0: no Ramp needed for this test, and a background one
         # left running past it would be a stray write for a later test.
@@ -1760,6 +1767,16 @@ class TestMonitorLinkReplies(HttpTestCase):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).get_json()["monitor"]["link"], "ok")
 
+    def test_every_success_reply_carries_the_bridge_version(self):
+        # Issue #43: `version` sits next to `monitor` on each command's
+        # success reply, not only on /health and /moonhalo/status.
+        for path in ("/moonhalo/on?level=50&transition=0", "/moonhalo/off?transition=0",
+                     "/moonhalo/brightness/50?transition=0", "/moonhalo/colortemp/7?transition=0"):
+            with self.subTest(path=path):
+                body = self.client.get(path).get_json()
+                self.assertTrue(body["ok"])
+                self.assertEqual(body["version"], __version__)
+
     def test_failed_command_reports_failed_everywhere_until_the_next_success(self):
         outage = DdcError("SetVCPFeature failed for VCP 0xD9", -1071241854)
         self._arm_failure(outage)
@@ -1772,6 +1789,9 @@ class TestMonitorLinkReplies(HttpTestCase):
         self.assertEqual(body["monitor"]["link"], "failed")
         self.assertEqual(body["monitor"]["error"], str(outage))
         self.assertIsInstance(body["monitor"]["at"], str)
+        # Issue #43: the 500 body carries the version too, so the Driver
+        # reads it from every reply in the one place it reads `monitor`.
+        self.assertEqual(body["version"], __version__)
         failed = body["monitor"]
 
         self.assertEqual(self.client.get("/moonhalo/status").get_json()["monitor"], failed)

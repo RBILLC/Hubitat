@@ -116,10 +116,10 @@ VCP writes it produced, and the outcome, for example:
 ## HTTP API
 
 Every endpoint is a GET request and returns JSON. A successful call returns
-`{"ok": true, "state": {...}, "monitor": {...}}`; a failed one returns
+`{"ok": true, "state": {...}, "version": "...", "monitor": {...}}`; a failed one returns
 `{"ok": false, "error": "..."}` with an HTTP status of 400 (bad input), 403 (caller not in the
-allowlist), or 500 (DDC/CI failure, with the `monitor` object as well). `state` always has the
-same shape:
+allowlist), or 500 (DDC/CI failure, with `version` and the `monitor` object as well). `state`
+always has the same shape:
 
 | Field | Meaning |
 |---|---|
@@ -145,6 +145,23 @@ Bridge never sends it.
 | `error` | The error text of the last failure, for example `SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)`; `null` when the link is `ok` or `unknown`. |
 | `at` | When the last attempt was made, ISO 8601 with the PC's UTC offset; `null` until the first. |
 
+The same replies carry the Bridge's own version next to `monitor`, so the Hub can see which
+Bridge it is talking to once the two pieces are upgraded separately:
+
+| Field | Meaning |
+|---|---|
+| `version` | The Bridge version, `"0.0.9"`, the same number `/health` has always reported. The Driver keeps it as the `bridgeVersion` state variable on the device page, taken from every reply including the status poll and a 500. |
+
+**Versions.** The Driver and the Bridge are versioned separately; each moves only when it changes.
+The Driver declares the oldest Bridge it can read (`0.0.9` for Driver 0.0.14, the first Bridge to
+send `version`) and compares the reported version with it numerically per dotted segment, so
+`0.0.10` is newer than `0.0.9`. A Bridge that is too old, or one from before 0.0.9 that sends no
+`version` at all, is shown in place on the device page as `0.0.8 (Driver needs 0.0.9 or later)` or
+`unknown (Driver needs 0.0.9 or later)`, with one warning in the hub log. A Bridge newer than the
+Driver is never flagged: the reply contract only ever gains fields, so a newer Bridge keeps working.
+The Driver's minimum moves only when the Driver starts reading something an older Bridge does not
+send; a Bridge release on its own never moves it.
+
 | Endpoint | Parameters | Notes |
 |---|---|---|
 | `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. If the halo is already on, this moves to the level exactly like `/moonhalo/brightness` (no D7 write; the same target as a running Ramp leaves it alone). From dark with a pace of `0` it snaps: D7 on, then one D9 write, as before. From dark otherwise it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level at the pace below. |
@@ -162,8 +179,8 @@ intervals. A shorter Sweep time keeps the writes ~60ms apart and drops steps eve
 sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the same share of that,
 rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
-| `GET /moonhalo/status` | none | Returns the remembered state and the Monitor link; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.8", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
+| `GET /moonhalo/status` | none | Returns the remembered state, the Bridge version and the Monitor link; performs no DDC/CI call. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.9", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -179,6 +196,7 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "monitor": "RD280UG on \\\\.\\DISPLAY1"
   },
   "transition": {"seconds": 0.0, "steps": 1},
+  "version": "0.0.9",
   "monitor": {"link": "ok", "error": null, "at": "2026-09-14T17:56:03-04:00"}
 }
 ```
@@ -189,6 +207,7 @@ The same command while the monitor is not answering replies with a 500:
 {
   "ok": false,
   "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
+  "version": "0.0.9",
   "monitor": {
     "link": "failed",
     "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
@@ -211,7 +230,7 @@ curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
 ```
 
 ```json
-{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}}
+{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}, "version": "0.0.9", "monitor": {"...": "..."}}
 ```
 
 The same move from step 1 with `sweep=0.9` (or `transition_seconds` 0.9 and no query) reports
