@@ -41,7 +41,7 @@ Whether the Hub could reach the Bridge on its last attempt: online, offline, or 
 _Avoid_: connection state, health, presence, reachability, bridge state
 
 **Monitor link**:
-Whether the Bridge could talk to the monitor over DDC/CI on its last attempt, whatever the attempt was: ok, failed, or unknown. Failed says only that the last attempt failed; the Bridge cannot tell a stuck link from DDC/CI switched off at the monitor.
+Whether the Bridge could talk to the monitor over DDC/CI on its last attempt, whatever the attempt was: ok, failed, or unknown. Failed says only that the last attempt failed; the Bridge cannot tell a stuck link from DDC/CI switched off at the monitor. On the Hub it has a fourth value, unreachable: the Bridge link is offline, so the Bridge's last word is not current (decided 2026-09-16, Driver 0.0.13).
 _Avoid_: monitor state, DDC state, DDC/CI state, bridge state, channel
 
 **Transition**:
