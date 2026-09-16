@@ -58,9 +58,11 @@ and report `failed` when it is absent. Done before Step 2, which touches the sam
 Status 2026-09-16 evening: Bridge 0.0.8 implemented on `main` (detection in `moonhalo_bridge/ddc.py`,
 `monitor_model` config key, `state.monitor` now `RD280UG on \\.\DISPLAY1`, `py -m moonhalo_bridge
 monitors` prints the selection, `--monitor` CLI selector, README "What the Bridge assumes"). The
-live config's `monitor_selector` workaround was set back to `null` and the task restarted; see the
-ticket for the PC check results. Left for the user: a hub command moves the halo, then the
-cable-unplugged check (`monitorLink failed` naming the missing model).
+live config's `monitor_selector` workaround was set back to `null` and the task restarted. PC check
+passed the same evening (hub command moves the halo; cable unplugged gives `monitorLink failed`
+naming the missing model, plugged back in recovers with no restart); the check found and fixed a
+30 s miss cooldown (each miss cost a 2.8 s capabilities read and detection ran on every call, which
+outlasted the Driver's request timeout). Shipped as 443c791, #40 closed. Step 1b done.
 Related facts recorded in `docs/research/rd280ug-d6-power-mode.md`: the RD280UG's button standby is
 invisible to DDC/CI (writes succeed, D6 reads 0x60 on and off), so no `standby` value is possible.
 
