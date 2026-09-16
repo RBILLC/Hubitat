@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import Config
-from .ddc import DEFAULT_READ_RETRY_DELAY, DdcError, DdcPort, MonitorInfo
+from .ddc import DEFAULT_READ_RETRY_DELAY, DdcError, DdcPort
 
 _logger = logging.getLogger(__name__)
 
@@ -330,24 +330,6 @@ def pack_d9(colortemp_step: int, brightness_step: int) -> int:
     return ((colortemp_step & 0xFF) << 8) | (brightness_step & 0xFF)
 
 
-def _select_monitor_description(monitors: list[MonitorInfo], selector: Optional[str]) -> str:
-    """Pick the description of the selected monitor from an already-fetched
-    `list_monitors()` result, mirroring `WindowsDdcPort`'s own selection
-    rule: a case-insensitive substring match on `selector` if given, else
-    the primary monitor, else the first monitor, else "unknown"."""
-    if not monitors:
-        return "unknown"
-    if selector:
-        needle = selector.lower()
-        for monitor in monitors:
-            if needle in monitor.device_name.lower() or needle in monitor.description.lower():
-                return monitor.description
-    for monitor in monitors:
-        if monitor.primary:
-            return monitor.description
-    return monitors[0].description
-
-
 class MoonHaloModel:
     """Owns remembered Target state, persists it to `config.state_file`, and
     performs the DDC writes for `turn_on` / `turn_off` / `set_colortemp`,
@@ -370,7 +352,7 @@ class MoonHaloModel:
         #: awake the moment a Ramp is planned, retargeted, or cancelled.
         self._condition = threading.Condition(self._lock)
         self._state = self._load_state()
-        self._monitor_description = self._load_monitor_description()
+        self._resolve_monitor_at_startup()
         #: The VCP writes the most recently completed call actually
         #: performed *synchronously*, in order, for the HTTP layer to log
         #: accurately. A Ramp's writes happen later, on the worker thread,
@@ -419,12 +401,16 @@ class MoonHaloModel:
         self._monitor_link = MonitorLink.ok()
         return result
 
-    def _load_monitor_description(self) -> str:
+    def _resolve_monitor_at_startup(self) -> None:
+        """Pick the target monitor now (issue #40) so `state.monitor` is
+        known before the first command and a miss is in the log at
+        start-up. The port logs the outcome; the Monitor link stays
+        `unknown` until the first command, which resolves again only if
+        the display set changed or nothing was found."""
         try:
-            monitors = self._port.list_monitors()
+            self._port.resolve_target()
         except Exception:
-            return "unknown"
-        return _select_monitor_description(monitors, self._config.monitor_selector)
+            pass
 
     def _load_state(self) -> MoonHaloState:
         if self._state_file.exists():
@@ -1212,5 +1198,5 @@ class MoonHaloModel:
                 self._config.kelvin_max,
                 self._config.invert_colortemp,
             ),
-            "monitor": self._monitor_description,
+            "monitor": self._port.target_label,
         }

@@ -30,6 +30,28 @@ class ConfigTestCase(unittest.TestCase):
         return path
 
 
+class TestMonitorKeys(ConfigTestCase):
+    """Issue #40: `monitor_model` names what the Bridge detects when
+    `monitor_selector` is null."""
+
+    def test_documented_defaults(self):
+        self.assertIsNone(DEFAULTS["monitor_selector"])
+        self.assertEqual(DEFAULTS["monitor_model"], "RD280UG")
+        config = load_config(self.tmp_dir / "absent.json")
+        self.assertIsNone(config.monitor_selector)
+        self.assertEqual(config.monitor_model, "RD280UG")
+
+    def test_values_are_read(self):
+        config = load_config(self.write({"monitor_selector": "DISPLAY1", "monitor_model": "PD2700U"}))
+        self.assertEqual(config.monitor_selector, "DISPLAY1")
+        self.assertEqual(config.monitor_model, "PD2700U")
+
+    def test_blank_selector_means_detect_and_blank_model_means_the_default(self):
+        config = load_config(self.write({"monitor_selector": "  ", "monitor_model": None}))
+        self.assertIsNone(config.monitor_selector)
+        self.assertEqual(config.monitor_model, "RD280UG")
+
+
 class TestAnnounceDefaults(ConfigTestCase):
     def test_missing_file_gives_announcer_disabled(self):
         config = load_config(self.tmp_dir / "absent.json")

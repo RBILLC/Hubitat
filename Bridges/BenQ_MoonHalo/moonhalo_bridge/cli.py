@@ -5,12 +5,13 @@ in-memory fake with `--dry-run`.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
 from .capabilities import VcpEntry, parse_vcp_codes
-from .ddc import DdcError, DdcPort, FakeDdcPort, MonitorInfo, WindowsDdcPort
+from .ddc import DEFAULT_MONITOR_MODEL, DdcError, DdcPort, FakeDdcPort, MonitorInfo, WindowsDdcPort
 
 #: Hardware facts verified on the RD280UG on 2026-09-03, used to pre-load the
 #: `--dry-run` fake port.
@@ -38,13 +39,35 @@ DRY_RUN_CAPABILITIES = (
 )
 
 
-def make_dry_run_port() -> FakeDdcPort:
+def make_dry_run_port(
+    monitor_selector: Optional[str] = None,
+    monitor_model: str = DEFAULT_MONITOR_MODEL,
+    logger: Optional[logging.Logger] = None,
+) -> FakeDdcPort:
     """A FakeDdcPort pre-loaded with the RD280UG's verified hardware facts."""
     return FakeDdcPort(
         monitors=list(DRY_RUN_MONITORS),
         registers=dict(DRY_RUN_REGISTERS),
         capabilities=DRY_RUN_CAPABILITIES,
+        monitor_selector=monitor_selector,
+        monitor_model=monitor_model,
+        logger=logger,
     )
+
+
+def cli_logger() -> logging.Logger:
+    """Where the port's detection lines go for `monitors`, `read`, `write`
+    and `capabilities`: warnings to stderr, so an ambiguous or unanswering
+    monitor is seen at the prompt. `serve` uses the Bridge's file logger
+    instead."""
+    logger = logging.getLogger("moonhalo_bridge.cli")
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+        logger.propagate = False
+    return logger
 
 
 def parse_vcp_code(text: str) -> int:
@@ -77,9 +100,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use an in-memory fake monitor; perform no Windows API calls",
     )
+    parser.add_argument(
+        "--monitor",
+        default=None,
+        metavar="SELECTOR",
+        help=(
+            "substring of a monitor's device name or description to act on, "
+            "instead of detecting the %s by its capabilities (monitors, read, "
+            "write, capabilities; serve takes config.json's monitor_selector)"
+        )
+        % DEFAULT_MONITOR_MODEL,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("monitors", help="list attached monitors")
+    sub.add_parser("monitors", help="list attached monitors and which one is the MoonHalo")
 
     sub.add_parser(
         "capabilities", help="read and parse the monitor's DDC/CI capabilities string"
@@ -122,12 +156,20 @@ def _format_vcp_entry(entry: VcpEntry) -> str:
 
 
 def _run_monitors(port: DdcPort, out: TextIO) -> int:
+    """List every attached monitor, then which one the port would act on
+    and by which rule (issue #40) -- with the real port this reads each
+    monitor's capabilities, which can take a few seconds."""
     monitors = port.list_monitors()
     if not monitors:
         print("No monitors found.", file=out)
         return 0
     for monitor in monitors:
         print(_format_monitor(monitor), file=out)
+    detection = port.resolve_target()
+    if detection.found:
+        print(f"selected: {detection.label} (by {detection.rule})", file=out)
+    else:
+        print(f"selected: none ({detection.error})", file=out)
     return 0
 
 
@@ -185,7 +227,15 @@ def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     from werkzeug.serving import make_server
 
     config = load_config(config_path)
-    port: DdcPort = make_dry_run_port() if dry_run else WindowsDdcPort(monitor_selector=config.monitor_selector)
+    ddc_logger = file_logger("moonhalo_bridge.ddc", config)
+    if dry_run:
+        port: DdcPort = make_dry_run_port(config.monitor_selector, config.monitor_model, ddc_logger)
+    else:
+        port = WindowsDdcPort(
+            monitor_selector=config.monitor_selector,
+            monitor_model=config.monitor_model,
+            logger=ddc_logger,
+        )
     model = MoonHaloModel(port, config, logger=file_logger("moonhalo_bridge.model", config))
     app = create_app(model, config, arp=WindowsArpTable())
     # Bind before announcing, so a Bridge that cannot take its port never
@@ -249,7 +299,11 @@ def main(argv: Optional[Sequence[str]] = None, out: Optional[TextIO] = None) -> 
             print(f"error: {error}", file=sys.stderr)
             return 1
 
-    port: DdcPort = make_dry_run_port() if args.dry_run else WindowsDdcPort()
+    logger = cli_logger()
+    if args.dry_run:
+        port: DdcPort = make_dry_run_port(monitor_selector=args.monitor, logger=logger)
+    else:
+        port = WindowsDdcPort(monitor_selector=args.monitor, logger=logger)
 
     try:
         if args.command == "monitors":

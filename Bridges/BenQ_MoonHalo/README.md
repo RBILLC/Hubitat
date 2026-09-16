@@ -46,7 +46,8 @@ left out of `config.json` simply uses it.
 | `host` | `"0.0.0.0"` | Address the Bridge listens on. `0.0.0.0` means every interface, and the address announced to the Hub is then the one that routes to `hub_ip`; a specific address is announced as typed. `127.0.0.1` disables the announcement, since the Hub could never reach it. |
 | `port` | `5000` | TCP port the Bridge listens on. |
 | `default_on_level` | `50` | Level (1-100) used by `/moonhalo/on` when no level is given and none is remembered. |
-| `monitor_selector` | `null` | Case-insensitive substring to match a monitor's device name or description, for a PC with more than one monitor. `null` selects the primary monitor. |
+| `monitor_selector` | `null` | Manual override of which monitor the Bridge writes to: a case-insensitive substring of a monitor's device name (`DISPLAY1`) or description. `null` (the normal setting) lets the Bridge detect the monitor by `monitor_model` below. Set it only when detection cannot tell the monitors apart; the device name is then the handle, since descriptions can be identical (on 2026-09-16 both a PD2700U and the RD280UG reported `Generic PnP Monitor`). A device name names a Windows port, not the monitor: a cable move or a driver update can renumber it silently. A selector that matches nothing is an error, not a fallback to the first monitor. |
+| `monitor_model` | `"RD280UG"` | The `model(...)` the Bridge looks for in each attached monitor's DDC/CI capabilities string when `monitor_selector` is `null`, as a case-insensitive substring. See **What the Bridge assumes** below for how detection runs and what it does when nothing matches. |
 | `state_file` | `"state.json"` | Where remembered state is persisted. Relative paths resolve against the config file's own folder. |
 | `log_file` | `"bridge.log"` | Where request log lines are written, relative to the config folder. Keep a file: the logon task runs windowless, so `null` (stderr) would discard the log. |
 | `default_brightness_step` | `5` | Brightness step (1-10) used the first time a colour-only write needs the "other half" of the register and no state can be read from the monitor. |
@@ -127,7 +128,7 @@ same shape:
 | `brightnessStep` | Hardware brightness step, 1-10. |
 | `colorTempStep` | Hardware colour step, 1-7 (1 warm). |
 | `colorTemperature` | Colour temperature in Kelvin. |
-| `monitor` | The selected monitor's description string. |
+| `monitor` | Which monitor the Bridge writes to: `"<model> on <device name>"` from detection, for example `RD280UG on \\.\DISPLAY1`; `"<description> on <device name>"` with a `monitor_selector`; `"unknown"` when no monitor has been chosen (none matched, or none attached). This is the field to check when every link reads healthy but the halo does nothing. |
 
 Next to `state`, every reply the monitor had a hand in -- `/moonhalo/status`, `/health`, each
 success reply and the 500 body of a failed command -- carries the **Monitor link** as one
@@ -160,7 +161,7 @@ sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the s
 rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state and the Monitor link; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.7", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.8", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -173,7 +174,7 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "brightnessStep": 5,
     "colorTempStep": 4,
     "colorTemperature": 4600,
-    "monitor": "Generic PnP Monitor"
+    "monitor": "RD280UG on \\\\.\\DISPLAY1"
   },
   "transition": {"seconds": 0.0, "steps": 1},
   "monitor": {"link": "ok", "error": null, "at": "2026-09-14T17:56:03-04:00"}
@@ -300,11 +301,19 @@ py -m moonhalo_bridge monitors
 py -m moonhalo_bridge capabilities
 py -m moonhalo_bridge read D9
 py -m moonhalo_bridge write D7 544
+py -m moonhalo_bridge --monitor DISPLAY2 read D9
 ```
 
-`monitors` lists every attached physical monitor. `read <code>` reads a VCP register given as
-hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>` writes a
-value (decimal or `0x`-hex) to a VCP register and reads it back to confirm.
+`monitors` lists every attached physical monitor, then which one the Bridge would write to and
+by which rule, for example `selected: RD280UG on \\.\DISPLAY1 (by model)` or `selected: none
+(no monitor with model RD280UG among: PD2700U (\\.\DISPLAY2))`; with a real monitor this reads
+each monitor's capabilities, which can take a few seconds. `read <code>` reads a VCP register
+given as hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>`
+writes a value (decimal or `0x`-hex) to a VCP register and reads it back to confirm. All four
+act on the detected monitor (see **What the Bridge assumes**); `--monitor <selector>` before the
+command acts on a monitor by device name or description instead, the way `monitor_selector`
+does for `serve`, which is how to read another monitor's registers (the PD2700U's D9 answers
+`current=0 maximum=0`).
 
 `capabilities` reads the monitor's own DDC/CI capabilities string and prints it verbatim, then
 a blank line, then every VCP register it advertises, one per line in the monitor's own order,
@@ -466,9 +475,37 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `bridgeLink` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
 | The device page shows `monitorLink` failed (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails with `Win32 error -1071241854`, and `/health` is fine | The Monitor link is down while the Bridge itself is healthy; the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (2) power-cycle the monitor at its button; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. `monitorLinkError` and `monitorLinkErrorAt` on the device page hold the last error and its time; the first command after the link is back sets `monitorLink` ok. |
+| The halo does nothing while every link reads healthy: `bridgeLink online`, `monitorLink ok`, `switch on` on the device page, `ok` replies with the expected writes in `bridge.log` | The writes are reaching a monitor that is not the RD280UG. The Monitor link only says a monitor acknowledged the last DDC/CI call, and nothing in a DDC/CI write says which monitor. Check `state.monitor` in `/moonhalo/status` (`curl http://localhost:5000/moonhalo/status`): it should read `RD280UG on \\.\DISPLAYn`. Anything else means `monitor_selector` is set to the wrong monitor (clear it to `null` and restart the task, so detection picks the RD280UG by its capabilities), or `monitor_model` does not match. `py -m moonhalo_bridge monitors` prints every monitor and the same selection with its rule. Bridge 0.0.7 and earlier selected the Windows primary display when `monitor_selector` was `null`, which is how this happened on 2026-09-16 after a second monitor was added. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
 | A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition (ms)** preference as `sweep`) keeps that pace at any Sweep time of `0.54` or less, writing fewer of the nine steps the shorter it is (six at `0.3`, which looked smooth on the real halo); a longer Sweep time spaces the writes out, which is what reads as stepping. An explicit `transition` from a rule is a total time and spreads its writes over exactly that, so a long one steps visibly too -- pass a shorter time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
+
+## What the Bridge assumes
+
+- **It runs in your logon session.** The display functions belong to the interactive desktop;
+  session 0 (a service) reports success and reaches no monitor. See **Running at logon**.
+- **The RD280UG is attached over a cable that carries DDC/CI**, on the PC the Bridge runs on. The
+  Bridge cannot tell a stuck link from DDC/CI switched off in the OSD; either shows as a failed
+  Monitor link.
+- **There is one RD280UG.** With `monitor_selector` `null`, the Bridge picks the monitor to write
+  to by what it is, not by which display Windows calls primary: it reads each attached monitor's
+  DDC/CI capabilities string (three attempts 50ms apart, as `capabilities` does) and keeps the
+  one whose `model(...)` contains `monitor_model`. If the capabilities read fails on every
+  monitor it falls back to the D9 probe: the monitor whose D9 read (the MoonHalo's own register)
+  returns a non-zero maximum, which the PD2700U for one does not. Two model matches are broken
+  by the same probe; still ambiguous, the first is taken and one warning names the candidates. A
+  model match whose D9 maximum is zero (or whose D9 read fails) stands, with a warning.
+  Detection runs at start-up and again whenever the set of attached display names differs from
+  the set seen last time, so a cable swap while running corrects itself on the next command. A
+  miss stands for 30 seconds while the display set is unchanged, then detection is tried again:
+  each miss costs a capabilities read per monitor (2.8 s on a PD2700U), and detecting on every
+  command made a queued command outlast the Driver's request timeout. When no monitor matches, nothing is written: the
+  command gets a 500, the Monitor link goes `failed` with an error such as `no monitor with model
+  RD280UG among: PD2700U (\\.\DISPLAY2)`, and `/moonhalo/status` reports the same. One
+  `bridge.log` line per detection says what was chosen, by which rule (`model`, `d9-probe`,
+  `tie-break`, `first-of-ambiguous` or `selector`) and the candidates seen; a miss is logged as a
+  warning with the reason. Start-up can take a few seconds longer for the capabilities reads
+  (Microsoft: "sometimes it can take several seconds to complete").
 
 ## Checking a Ramp on the real halo
 

@@ -24,7 +24,11 @@ DEFAULTS: dict[str, Any] = {
     "host": "0.0.0.0",
     "port": 5000,
     "default_on_level": 50,
+    # Which monitor (issue #40): with `monitor_selector` null the Bridge
+    # detects the monitor whose DDC/CI capabilities name `monitor_model`;
+    # a selector (substring of the device name or description) overrides.
     "monitor_selector": None,
+    "monitor_model": "RD280UG",
     "state_file": "state.json",
     "log_file": "bridge.log",
     "default_brightness_step": 5,
@@ -82,6 +86,7 @@ class Config:
     announce_seconds: int = 60
     announce_enabled: bool = False
     transition_seconds: float = 0.3
+    monitor_model: str = "RD280UG"
 
     @property
     def maker_configured(self) -> bool:
@@ -149,7 +154,8 @@ def load_config(path: Optional[Path] = None) -> Config:
         host=merged["host"],
         port=int(merged["port"]),
         default_on_level=int(merged["default_on_level"]),
-        monitor_selector=merged["monitor_selector"],
+        monitor_selector=_optional_str(merged["monitor_selector"]),
+        monitor_model=_optional_str(merged["monitor_model"]) or DEFAULTS["monitor_model"],
         state_file=_resolve_path(merged["state_file"], base_dir),
         log_file=_resolve_path(merged["log_file"], base_dir),
         default_brightness_step=int(merged["default_brightness_step"]),

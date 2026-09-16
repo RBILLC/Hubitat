@@ -3,6 +3,7 @@
   "port": 5000,
   "default_on_level": 50,
   "monitor_selector": null,
+  "monitor_model": "RD280UG",
   "state_file": "state.json",
   "log_file": "bridge.log",
   "default_brightness_step": 5,
