@@ -90,7 +90,17 @@ the next poll). The check raised two points, decided the same evening:
 - The `monitorLinkError`/`monitorLinkErrorAt` state is history by design (kept across recovery) and
   stays; the names are the problem, so #41 renames them to `lastMonitorError`/`lastMonitorErrorAt`.
 
-Order is now #43, then #41 (Driver 0.0.15, blocked by #43 on GitHub), then the 1.0.0 bump.
+Status 2026-09-16 late night: #43 shipped as 9e9a518 (Bridge 0.0.9 / Driver 0.0.14) and closed after
+the hub check passed (Driver 0.0.14 against Bridge 0.0.8 showed `unknown (Driver needs 0.0.9 or later)`
+with one warning; the task restarted on 0.0.9 showed `0.0.9` with one info line within a poll; stop and
+start of the task left it at `0.0.9`). During the check the RD280UG's DDC/CI link stuck after a cable
+replug (every call on DISPLAY1 failed with 0xC0262582, the 09-14 error) and the Bridge reported it as
+`unreadable` without trying the D9 probe; that gap and the evidence are
+[#44](https://github.com/RBILLC/Hubitat/issues/44) (needs-triage), a Bridge-only change that does not
+collide with #41. A research pass on monitor identity without DDC/CI (EDID via WMI or EnumDisplayDevices)
+feeds #44 before it is grilled.
+
+Order is now #41 (Driver 0.0.15, unblocked), #44 after its research and grilling, then the 1.0.0 bump.
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
