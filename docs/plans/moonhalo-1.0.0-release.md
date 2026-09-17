@@ -100,7 +100,9 @@ replug (every call on DISPLAY1 failed with 0xC0262582, the 09-14 error) and the 
 collide with #41. A research pass on monitor identity without DDC/CI (EDID via WMI or EnumDisplayDevices)
 feeds #44 before it is grilled.
 
-Order is now #41 (Driver 0.0.15, unblocked), #44 after its research and grilling, then the 1.0.0 bump.
+Order, decided by the user 2026-09-16 late night: #44 first (research, then grilling, then a ticket edit and
+/implement), #41 last (Driver 0.0.15; the clean-up closes the code, so nothing lands after it), then the
+1.0.0 bump.
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
