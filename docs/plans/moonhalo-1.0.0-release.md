@@ -213,6 +213,15 @@ shows the nine preferences with the new text and no Kelvin ones; hub default tra
 Driver 0.0.16, PC runs Bridge 0.0.12; main is pushed and clean. Nothing queued. NEXT when the user says so: the
 1.0.0 bump (Step 2 tail), then Steps 3 to 5 under #38. #45, #26 later.
 
+Status 2026-10-08 evening, header review: the user asked whether the Driver header (lines 1 to 84) reads as a senior
+engineer's. Verdict: the shape is right; missing a license line, the behavior bullets float unlabelled, the State
+bullet duplicates the code, and the changelog is 49 of 83 lines with six entries from one day of Google Home typing
+tests. Decisions: MIT (LICENSE.txt is already MIT), `Author: RBILLC` stays, the State bullet goes. Filed as
+[#49](https://github.com/RBILLC/Hubitat/issues/49) (ready-for-agent, Driver 0.0.17, comments only; steps and
+acceptance in the ticket). The changelog squash waits for the 1.0.0 bump as a sub-bullet of #38's clean-up step; the
+preference-rename step in #38 is ticked (done in 0.0.15 and 0.0.16). QUEUED: /clear, then /implement #49, push,
+import on the hub, save once, close. 1.0.0 stays PARKED. #45, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping

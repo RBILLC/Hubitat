@@ -10,6 +10,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
+- **Edit an issue body**: fetch it to a file with redirection, `gh issue view <number> --json body --jq .body > body.md`; patch the file with a Python script; write it back with `gh issue edit <number> --body-file body.md`; then verify the line count survived: `@(gh issue view <number> --json body --jq .body).Count` must equal the file's. Never route the body through `Set-Content -NoNewline`: PowerShell's pipeline splits it into lines and `-NoNewline` joins them with no separator (this flattened #38 on 2026-10-08).
 
 Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
 
