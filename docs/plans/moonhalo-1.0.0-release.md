@@ -113,6 +113,20 @@ research note shows the EDID identity is free from `EnumDisplayDevices`, so #44 
 the slowness and the stuck-link reporting; its scope is restated in a comment on the ticket. Next:
 /grill-with-docs on #44, then /implement as Bridge 0.0.10, hub check; then #41; then 1.0.0.
 
+Status 2026-10-08 evening: #44 grilled (`/grill-with-docs`) and edited into a ready-for-agent ticket, Bridge
+0.0.10, Bridge-only. Decisions: identify by EDID identity read from the registry EDID cache located through
+`EnumDisplayDevices` (option B; `QueryDisplayConfig` set aside because it has no serial); new config key
+`monitor_product` (default `BNQ80BB`), `monitor_model` retired, the label is the EDID name (`BenQ RD280UG on
+\\.\DISPLAY1`); no DDC/CI on the detection path (capabilities read, D9 probe and sanity check go; rules
+`edid`, `selector`, `first-of-ambiguous`, `none`); no miss cooldown, misses logged once per reason, display-set
+cache kept; error texts `identified by EDID; DDC/CI not answering: ...` (hex next to the decimal) and
+`is not attached: asleep, off or unplugged; attached: ...`; `monitors` prints product, name and serial per
+display; no Driver change. Glossary entries EDID identity, Attached, Monitor detection added to `CONTEXT.md`.
+No public BenQ product-code cross-reference exists (BenQ never registered `BNQ` with UEFI); the monitor's own
+EDID name is the cross-reference, which `monitors` prints. Several RD280UGs on one PC is
+[#45](https://github.com/RBILLC/Hubitat/issues/45) (needs-triage, later). Next: /implement #44, restart the
+task, hub check (first command after a wake inside the 5 s timeout); then #41; then 1.0.0.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping

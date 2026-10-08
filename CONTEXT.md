@@ -44,6 +44,18 @@ _Avoid_: connection state, health, presence, reachability, bridge state
 Whether the Bridge could talk to the monitor over DDC/CI on its last attempt, whatever the attempt was: ok, failed, or unknown. Failed says only that the last attempt failed; the Bridge cannot tell a stuck link from DDC/CI switched off at the monitor. On the Hub it has a fourth value, unreachable: the Bridge link is offline, so the Bridge's last word is not current (decided 2026-09-16, Driver 0.0.13).
 _Avoid_: monitor state, DDC state, DDC/CI state, bridge state, channel
 
+**EDID identity**:
+What a monitor declares itself to be in its EDID: a manufacturer code and a product code (together `BNQ80BB` for the RD280UG), a name (`BenQ RD280UG`) and a serial. Windows reads it when the monitor is plugged in and keeps it, so it is available without DDC/CI, and it names the monitor rather than the port it is on.
+_Avoid_: PnP ID, hardware ID, device ID, model (when meaning the identity)
+
+**Attached**:
+Listed by Windows as part of the desktop. A monitor in standby, switched off or unplugged is not attached; the Bridge cannot tell those apart.
+_Avoid_: connected, present, plugged in, enumerated
+
+**Monitor detection**:
+How the Bridge decides which attached monitor carries the MoonHalo: the one whose EDID identity matches, whatever port it is on and whether or not it is the primary display; a manual selector overrides it. A detection says which monitor, not whether it answers; that is the Monitor link. It reports its rule as one of `edid`, `selector`, `first-of-ambiguous` or `none`.
+_Avoid_: monitor selection, auto-detect, probing, primary monitor
+
 **Transition**:
 The time over which the Bridge moves the MoonHalo from its applied setting to the target setting. Zero means the change is immediate.
 _Avoid_: fade, transition time, tt, duration (when meaning the concept)
