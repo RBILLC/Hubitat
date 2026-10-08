@@ -223,6 +223,9 @@ preference-rename step in #38 is ticked (done in 0.0.15 and 0.0.16). QUEUED: /cl
 import on the hub, save once, close. 1.0.0 stays PARKED. #45, #26 later. Added later the same evening: #49
 also changes the first line of LICENSE.txt to `Copyright (c) 2025-2026 Rothenberg Industries, LLC` (the user owns the
 LLC, registered in NY; the holder name was the agent's call).
+Later still: the changelog squash moved INTO #49 (decision 5: 0.0.0 to 0.0.16 collapse into one pre-release line
+under 0.0.17; the Google Home typing lesson must be in the research note). The version stays 0.0.17; the user wants a
+final verification before the 1.0.0 bump, which remains under #38.
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
