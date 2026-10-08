@@ -193,6 +193,14 @@ from full (a stuck link right after the button wake refuses that off too; the ne
 dim-out, sleep, wake, halo stays dark, off writes the lone D7 off; then close #46. 1.0.0 stays PARKED. #45, #26
 later.
 
+Status 2026-10-08 evening: #46 CLOSED after a partial PC check, at the user's word. Task restarted on 0.0.12 at
+16:52 (`/health` 0.0.12, device page Bridge Version 0.0.12, Monitor Link ok). Seen on the real halo: on from a
+confirmed off relights and rises; off dims out and confirms; after `DisplaySwitch /internal` with the halo lit,
+the wake (`/extend` plus the button) relit the halo by firmware and the next off dimmed out from the Applied step
+10 (nine writes then D7 off), where 0.0.11 wrote a lone D7 off. Not run: the refusal while asleep (the hub's off
+never reached the Bridge, cause on the hub side not established) and a confirmed off surviving sleep and wake;
+both covered by tests only, the closing comment says so. 1.0.0 stays PARKED; nothing is queued. #45, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
