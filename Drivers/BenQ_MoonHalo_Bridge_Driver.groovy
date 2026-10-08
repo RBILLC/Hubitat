@@ -2,7 +2,7 @@
  * BenQ MoonHalo Bridge
  *
  * Presents the MoonHalo backlight of a BenQ RD280UG monitor to the Hub as a
- * dimmable colour-temperature light. Every command is one asynchronous HTTP
+ * dimmable color-temperature light. Every command is one asynchronous HTTP
  * GET to the Bridge, the service on the PC the monitor is attached to; the
  * Bridge does the DDC/CI. Contract: Bridges/BenQ_MoonHalo/README.md, HTTP API.
  *
@@ -17,19 +17,23 @@
  * - setLevel's rate or setColorTemperature's tt goes to the Bridge as transition
  *   (seconds; 0 snaps); without one the Default transition preference goes as sweep.
  * - on() sends no level; the Bridge restores the level it remembers.
- * - setColorTemperature while off turns the MoonHalo on unless colour
- *   pre-staging is enabled.
+ * - setColorTemperature while off turns the MoonHalo on unless color
+ *   pre-staging is enabled. The Kelvin goes to the Bridge as sent (floor 1000);
+ *   the Bridge clamps it to its own kelvin_min..kelvin_max and maps it to a step.
  * - The Bridge announces its address through the Maker API (setBridgeAddress);
  *   it wins over the typed IP, and silence past the announcement timeout is offline.
  * - State: announcedIp/announcedPort, lastSeen/lastAnnounce (epoch twins
  *   lastSeenAt/lastAnnounceAt), lastMonitorError/lastMonitorErrorAt,
  *   bridgeVersion, typedAddress.
  *
- * Version: 0.0.15 (pre-release; 1.0.0 on public announcement). The Bridge is versioned
+ * Version: 0.0.16 (pre-release; 1.0.0 on public announcement). The Bridge is versioned
  * separately; every reply reports its number (bridgeVersion). Minimum Bridge version: 0.0.9
  * (MIN_BRIDGE_VERSION); it moves only when the Driver reads something an older Bridge does not send.
  *
  * Changelog:
+ * 2026-10-08 0.0.16 - warmKelvin and coolKelvin preferences dropped (removed on save): the Bridge owns
+ *                     the Kelvin range; every preference has a description; American spelling
+ *                     throughout (issue #48)
  * 2026-10-08 0.0.15 - preferences renamed: timeoutSec -> requestTimeoutSec, ctMinKelvin -> warmKelvin,
  *                     ctMaxKelvin -> coolKelvin, pollMinutes -> pollIntervalMin (retyped once, old
  *                     settings removed on save); state monitorLinkError/monitorLinkErrorAt ->
@@ -60,14 +64,14 @@
  *                    on() for one slider move, and on() replayed the stale level (issue #21)
  * 2026-09-04 0.0.6 - connectionState is an attribute again (accepted by Google Home in 0.0.2);
  *                    no ColorMode: Hubitat's built-in Google Home app rejects colorMode without
- *                    full colour and gives a CT-only driver no temperature trait (issue #21)
+ *                    full color and gives a CT-only driver no temperature trait (issue #21)
  * 2026-09-04 0.0.5 - Google Home typing test: colorMode "CT" back, still no custom attribute;
  *                    0.0.4 was accepted but typed as a plain dimmer (issue #21)
  * 2026-09-04 0.0.4 - Google Home typing test: attribute set reduced to the CT bulb's (switch,
  *                    level, colorTemperature, colorName); connectionState kept as a data value;
  *                    stale colorMode/connectionState attributes purged on save (issue #21)
  * 2026-09-04 0.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
- *                    as a plain dimmer with no colour-temperature control; Initialize stays out
+ *                    as a plain dimmer with no color-temperature control; Initialize stays out
  *                    (issue #21)
  * 2026-09-04 0.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
  *                    Google Home app with Bulb alone; accepted CT-only drivers declare neither
@@ -97,7 +101,7 @@ metadata {
         attribute "monitorLink", "enum", ["unknown", "ok", "failed", "unreachable"]
         attribute "bridgeAddress", "string"
 
-        command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware colour temperature step, 1 (warm) to 7 (cool)"]]
+        command "setColorTempStep", [[name: "Step*", type: "NUMBER", description: "Hardware color temperature step, 1 (warm) to 7 (cool)"]]
         command "setBridgeAddress", [
             [name: "IP address*", type: "STRING", description: "IPv4 address the Bridge is listening on; sent by the Bridge itself through the Maker API"],
             [name: "Port*", type: "NUMBER", description: "TCP port the Bridge is listening on, 1-65535"]
@@ -105,15 +109,13 @@ metadata {
     }
 
     preferences {
-        input name: "bridgeIp", type: "text", title: "Bridge IP address (initial)", description: "IPv4 address of the PC running the MoonHalo Bridge; used only until the Bridge announces its own address", required: true
-        input name: "bridgePort", type: "number", title: "Bridge port (initial)", defaultValue: 5000, range: "1..65535"
-        input name: "announceTimeoutSec", type: "number", title: "Announcement timeout (seconds)", description: "Once the Bridge has announced its address, mark it offline when nothing has been heard from it for this long; 0 disables the check. Must exceed the Bridge's announce_seconds", defaultValue: 200, range: "0..86400"
-        input name: "requestTimeoutSec", type: "number", title: "Request timeout (seconds)", defaultValue: 5, range: "1..30"
-        input name: "pollIntervalMin", type: "enum", title: "Poll interval", description: "How often the Hub asks the Bridge for its status", options: [["0": "Disabled"], ["1": "1 minute"], ["5": "5 minutes"], ["10": "10 minutes"], ["15": "15 minutes"], ["30": "30 minutes"]], defaultValue: "5"
-        input name: "warmKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
-        input name: "coolKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
-        input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Store a colour temperature while the MoonHalo stays off", defaultValue: false
-        input name: "defaultTransitionMs", type: "number", title: "Default transition (ms)", description: "Time a full brightness sweep takes when a command carries no rate, in whole milliseconds (0-60000; 0 snaps); blank uses the Bridge default", defaultValue: 300, range: "0..60000"
+        input name: "bridgeIp", type: "text", title: "Bridge IP address", description: "IPv4 address of the PC running the Bridge. Used until the Bridge announces its own address.", required: true
+        input name: "bridgePort", type: "number", title: "Bridge port", description: "Port the Bridge listens on (port in its config.json). Used until the Bridge announces its own.", defaultValue: 5000, range: "1..65535"
+        input name: "announceTimeoutSec", type: "number", title: "Announce timeout (seconds)", description: "Mark the Bridge offline when neither an announcement nor a reply has arrived for this long. 0 disables. Set it above the Bridge's announce_seconds.", defaultValue: 200, range: "0..86400"
+        input name: "requestTimeoutSec", type: "number", title: "Request timeout (seconds)", description: "Seconds to wait for the Bridge to answer a command before marking it offline.", defaultValue: 5, range: "1..30"
+        input name: "pollIntervalMin", type: "enum", title: "Poll interval", description: "How often to ask the Bridge for its status.", options: [["0": "Disabled"], ["1": "1 minute"], ["5": "5 minutes"], ["10": "10 minutes"], ["15": "15 minutes"], ["30": "30 minutes"]], defaultValue: "5"
+        input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Accept a color temperature while the MoonHalo is off without turning it on.", defaultValue: false
+        input name: "defaultTransitionMs", type: "number", title: "Default transition (ms)", description: "Time a full brightness sweep takes when a command carries no rate. 0 snaps; blank uses the Bridge default.", defaultValue: 300, range: "0..60000"
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
     }
@@ -137,8 +139,6 @@ void updated() {
     log.warn "announcement timeout is: ${announceTimeout()}s (0 = disabled)"
     log.warn "request timeout is: ${prefInt('requestTimeoutSec', 5)}s"
     log.warn "poll interval is: ${settings.pollIntervalMin} minutes (0 = disabled)"
-    log.warn "warm colour temperature is: ${prefInt('warmKelvin', 2700)}K"
-    log.warn "cool colour temperature is: ${prefInt('coolKelvin', 6500)}K"
     log.warn "color pre-staging is: ${colorStaging == true}"
     log.warn "debug logging is: ${logEnable == true}"
     log.warn "description logging is: ${txtEnable == true}"
@@ -191,9 +191,10 @@ private void purgeStaleAttributes() {
     }
 }
 
-// Preferences renamed in 0.0.15 are new settings; the old ones linger until removed.
+// Settings this version no longer declares linger until removed: the ones
+// renamed in 0.0.15 and the Kelvin range dropped in 0.0.16.
 private void purgeStaleSettings() {
-    ["timeoutSec", "ctMinKelvin", "ctMaxKelvin", "pollMinutes"].each { String name ->
+    ["timeoutSec", "ctMinKelvin", "ctMaxKelvin", "pollMinutes", "warmKelvin", "coolKelvin"].each { String name ->
         try {
             device.removeSetting(name)
         } catch (Exception e) {
@@ -288,18 +289,13 @@ void setLevel(value, rate = null) {
 }
 
 // tt travels like setLevel's rate, on both requests when a level is given:
-// brightness first, then colour from its reply, so the MoonHalo is on by then.
+// brightness first, then color from its reply, so the MoonHalo is on by then.
 void setColorTemperature(value, level = null, tt = null) {
     logDebug "setColorTemperature(${value}, ${level}, ${tt})"
     if (value == null) return
-    Integer ctMin = Math.max(1000, prefInt("warmKelvin", 2700))
-    Integer ctMax = Math.max(1000, prefInt("coolKelvin", 6500))
-    if (ctMin > ctMax) {
-        Integer swap = ctMin
-        ctMin = ctMax
-        ctMax = swap
-    }
-    Integer kelvin = limitIntegerRange(value, ctMin, ctMax)
+    // Floor 1000: the Bridge reads 1-7 as a hardware step and >= 1000 as Kelvin,
+    // which it clamps to its own range before mapping to a step.
+    Integer kelvin = limitIntegerRange(value, 1000, Integer.MAX_VALUE)
     if (kelvin == null) {
         log.warn "${device.displayName}: setColorTemperature ignored, '${value}' is not a number"
         return
@@ -386,8 +382,8 @@ private Boolean isIpv4(String text) {
     return text.matches('^(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}$')
 }
 
-// "?stage=1" when colour pre-staging is on and the MoonHalo is not on:
-// the Bridge then stores the colour without powering the halo.
+// "?stage=1" when color pre-staging is on and the MoonHalo is not on:
+// the Bridge then stores the color without powering the halo.
 private String stageQuery() {
     Boolean stage = (colorStaging == true) && (device.currentValue("switch") != "on")
     return stage ? "?stage=1" : ""

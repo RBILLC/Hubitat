@@ -10,7 +10,7 @@ when the Hub cannot talk to a device directly.
   moisture, soil temperature, illuminance, and battery from a Tuya TS0601 Zigbee soil sensor.
   Import URL: `https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/Tuya_TS0601_Soil_Sensor_Driver.groovy`
 - **BenQ MoonHalo Bridge** (`BenQ_MoonHalo_Bridge_Driver.groovy`) — presents the MoonHalo
-  backlight of a BenQ RD280UG monitor as a dimmable, colour-temperature light, driven over HTTP
+  backlight of a BenQ RD280UG monitor as a dimmable, color-temperature light, driven over HTTP
   by the BenQ MoonHalo Bridge below.
   Import URL: `https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy`
 
@@ -33,22 +33,20 @@ when the Hub cannot talk to a device directly.
 
 ### BenQ MoonHalo Bridge preferences
 
-- **Bridge IP address (initial)** and **Bridge port (initial)** — where the Bridge listens
-  (default port 5000). Once the Bridge has announced its own address (see below) these are
-  used again only after you retype them, until the next announcement.
-- **Announcement timeout (seconds)** — once the Bridge has announced its address, how long the
-  Hub waits without hearing from it (no announcement and no reply) before marking it offline
-  (default 200, three missed minutes; 0 disables the check). Must exceed the Bridge's
+- **Bridge IP address** and **Bridge port** — where the Bridge listens (default port 5000).
+  Once the Bridge has announced its own address (see below) these are used again only after
+  you retype them, until the next announcement.
+- **Announce timeout (seconds)** — once the Bridge has announced its address, how long the Hub
+  waits without hearing from it (no announcement and no reply) before marking it offline
+  (default 200, three missed minutes; 0 disables the check). Set it above the Bridge's
   `announce_seconds`. Until the first announcement ever arrives, only the status poll judges
   the Bridge.
-- **Request timeout (seconds)** — how long the Hub waits for the Bridge before treating it as
-  offline.
+- **Request timeout (seconds)** — how long the Hub waits for the Bridge to answer a command
+  before treating it as offline.
 - **Poll interval** — how often the Hub asks the Bridge for its status when no command has been
   sent (disabled, or every 1, 5, 10, 15, or 30 minutes).
-- **Warm colour temperature (Kelvin)** and **Cool colour temperature (Kelvin)** — the ends of the
-  colour temperature slider.
-- **Enable color pre-staging** — store a colour temperature while the MoonHalo stays off,
-  instead of turning it on.
+- **Enable color pre-staging** — accept a color temperature while the MoonHalo is off without
+  turning it on.
 - **Default transition (ms)** — how long a full brightness sweep takes when a command carries
   no rate of its own, in whole milliseconds (0 to 60000; 0 snaps; default 300, which looked
   smooth on the real halo). Every move runs at that pace, so a short move finishes sooner, and
@@ -57,6 +55,11 @@ when the Hub cannot talk to a device directly.
   setLevel or setColorTemperature still means the total time for that move and wins.
 - **Enable debug logging** and **Enable description text logging** — as in Hubitat's other
   drivers; debug logging turns itself off after 30 minutes.
+
+The color temperature range is the Bridge's (`kelvin_min` and `kelvin_max` in its
+`config.json`, default 2700 to 6500): the Driver sends the Kelvin it is given and the Bridge
+clamps it and maps it to one of the halo's seven steps. Driver 0.0.15 and earlier had a warm
+and a cool Kelvin preference for this; 0.0.16 removes them on the first save.
 
 #### Letting the Bridge announce its address
 
@@ -104,8 +107,8 @@ allowlist — is covered in [`Bridges/BenQ_MoonHalo/README.md`](Bridges/BenQ_Moo
 ### Google Home
 
 Hubitat's built-in **Google Home** app accepts the MoonHalo and gives on/off and brightness,
-but no colour-temperature control: as of September 2026 it exposes none for any
-colour-temperature bulb, including Hubitat's own Zigbee and Hue drivers (see
+but no color-temperature control: as of September 2026 it exposes none for any
+color-temperature bulb, including Hubitat's own Zigbee and Hue drivers (see
 `docs/research/google-home-colour-temperature.md`). For the white-temperature slider, share the
 device through the community **Google Home Community** app instead (install from Hubitat Package
 Manager; setup in its README at https://github.com/mbudnek/google-home-hubitat-community) with a
@@ -117,4 +120,4 @@ device type defined as:
   `colorTemperature`, command `setColorTemperature`.
 
 Do not share the MoonHalo through both apps at once. The slider settles on the nearest of the
-halo's seven colour steps after each move, which is expected.
+halo's seven color steps after each move, which is expected.
