@@ -4,6 +4,10 @@ Controls the MoonHalo backlight of a BenQ RD280UG monitor from a Hubitat hub by 
 
 ## Language
 
+**BenQ MoonHalo Bridge**:
+The product as a whole, Driver and Bridge together: the name the Driver carries on the Hub and the name used in public (the release thread, the README, the website). Inside the docs the bare word Bridge still means the PC service (decided 2026-10-08).
+_Avoid_: MoonHalo for Hubitat, the integration, the project (when meaning the product)
+
 **MoonHalo**:
 The LED backlight built into the rear of the BenQ RD280UG monitor. The only monitor feature this project controls.
 _Avoid_: Moon Halo, halo light, bias light, backlight
