@@ -263,6 +263,17 @@ the final verification before the bump remains under #38. #45, #26 later.
 - Review pass with `/code-review` against `main` before the bump; run `py -m unittest` from
   `Bridges/BenQ_MoonHalo` (289 tests as of tonight).
 
+Status 2026-10-08 night: Steps 3 and 4 grilled (`/grill-with-docs`, then `/to-tickets`). Decisions: the root README is
+the landing page in a twelve-section order (research: `readme-reference-examples.md`); "BenQ MoonHalo Bridge" names the
+whole product (CONTEXT.md); the thread is the 1.0.0 announcement, title `[RELEASE] BenQ MoonHalo Bridge - the RD280UG's
+MoonHalo backlight in Hubitat and Google Home`, signed michael.j.rothenberg, GitHub Issues for bugs, HPM later, trust
+section in, testers invited; the user also posts on X and writes a website page from the draft BEFORE the bump; LICENSE.txt
+gets George Gilman's 2025 line back above the LLC line (the Tuya driver is his, a fork carried alongside). Tickets:
+[#50](https://github.com/RBILLC/Hubitat/issues/50) release preparation (README, metadata, device-page screenshot, post and
+release-notes drafts, `docs/release-checklist.md`, LICENSE holders) and [#51](https://github.com/RBILLC/Hubitat/issues/51)
+the 1.0.0 bump, blocked by #50 and by the user's checklist pass. Sequence: #50 (agent), pictures and website (user),
+checklist (user), #51 (agent), then tag v1.0.0, GitHub Release, forum post, X (user). QUEUED: /clear, /implement #50.
+
 ## Step 3: Hubitat community post
 
 - Draft it in `docs/forum/` like the existing `google-home-colorsetting-request.md` (status line, suggested
