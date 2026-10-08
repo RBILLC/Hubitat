@@ -180,6 +180,19 @@ test). Left to the user: restart the task on 0.0.11, `py -m moonhalo_bridge moni
 
 Status 2026-10-08 night: #47 CLOSED after the PC check. The task restarted on 0.0.11 at 15:15 (`schtasks /end` then `/run`): `/health` reported 0.0.11, `monitors` selected `BenQ RD280UG on \\.\DISPLAY1 (by edid)`, `bridge.log` showed detection by edid and the announcement; the hub logged `Bridge version 0.0.11` once at 15:17:02 and the device page showed it after a reload (the State Variables block is a page-load snapshot, not live). `/code-review` found nothing to fix. The 1.0.0 bump is PARKED by the user until they say so; nothing is queued. #45, #46, #26 later.
 
+Status 2026-10-08 night (#46): Bridge 0.0.12 implemented on main as 785df2e (`/implement`, Bridge-only, Driver
+stays 0.0.15). Target power `unknown` is resolved by one D7 read (low byte `0x1x` dark; anything else, or a
+failed read, lit); an off from a lit halo with no Ramp in flight probes D9 first, so one sent while the monitor
+sleeps (or the link is stuck) is refused with a 500 and the switch stays on; a dim-out whose D7 off never lands
+sets Target power `unknown` and forgets the Applied state. 355 tests pass; `/code-review` found no standards
+breach, its judgement calls applied (`_halo_lit_locked` renamed `_resolve_lit_locked`; no D7 read for an
+explicit `transition=0`). Twelve of thirteen acceptance boxes ticked; the notes are in the ticket comment. Left to
+the user: restart the task on 0.0.12 (`schtasks /end` then `/run`, `/health` reports 0.0.12), then the PC check
+in the last box: off while asleep (hub log `Bridge rejected off`, switch stays on), button wake, off dims out
+from full (a stuck link right after the button wake refuses that off too; the next one dims out), then a normal
+dim-out, sleep, wake, halo stays dark, off writes the lone D7 off; then close #46. 1.0.0 stays PARKED. #45, #26
+later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
