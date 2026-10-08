@@ -73,9 +73,13 @@ The rule that times a Ramp: a Sweep time (the default, or a `sweep` passed with 
 _Avoid_: timing, speed, pace rule
 
 **Target state**:
-The MoonHalo setting most recently commanded. What the Bridge reports to the Hub, whether or not the Ramp has reached it.
+The MoonHalo setting most recently commanded. What the Bridge reports to the Hub, whether or not the Ramp has reached it. Its power is unknown when the Bridge could not confirm its last power write.
 _Avoid_: requested state, desired state
 
 **Applied state**:
 The MoonHalo setting the Bridge last wrote to the monitor. Equals the Target state once a Ramp completes.
 _Avoid_: current state, actual state, hardware state
+
+**Lit**:
+Whether the halo is giving light right now. The Bridge infers it from the Target state and from whether a dim-out is still in flight, and asks the monitor only when the Target state's power is unknown, because the monitor's registers report what was last written, not what is shown.
+_Avoid_: on (when meaning lit), actual state, hardware state
