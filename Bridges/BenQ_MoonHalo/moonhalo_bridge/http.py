@@ -51,7 +51,7 @@ def _log_move_request(
 ) -> None:
     """The on, off, brightness and colortemp endpoints' success log line:
     the immediate writes made (a Ramp's own writes are not among them) plus
-    the Transition applied -- its planned duration in seconds and its write
+    the Transition applied -- its planned seconds and its write
     count -- so a Ramp is traceable even though most of its writes happen
     later on the worker thread. For on/brightness/colortemp
     with a non-zero Transition while the halo was dark (issue #35), both

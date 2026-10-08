@@ -2,57 +2,39 @@
  * BenQ MoonHalo Bridge
  *
  * Presents the MoonHalo backlight of a BenQ RD280UG monitor to the Hub as a
- * dimmable colour-temperature light. The Driver never talks to the monitor:
- * every command is one short asynchronous HTTP GET to the Bridge, the service
- * on the Windows PC the monitor is attached to, using its JSON contract:
- * /moonhalo/on[?level=1-100], /moonhalo/off, /moonhalo/brightness/<0-100>
- * (0 = off), /moonhalo/colortemp/<value>[?stage=1] (1-7 is a hardware step,
- * 1000 or more is Kelvin) and /moonhalo/status; the first four also take
- * transition=<seconds> or sweep=<seconds>. Each reply is
- * {"ok": true, "state": {power, level, brightnessStep, colorTemperature,
- * colorTempStep, monitor}, "version": "x.y.z", "monitor": {link, error, at}}
- * or {"ok": false, "error": "...", "version": "x.y.z", "monitor": {...}}.
+ * dimmable colour-temperature light. Every command is one asynchronous HTTP
+ * GET to the Bridge, the service on the PC the monitor is attached to; the
+ * Bridge does the DDC/CI. Contract: Bridges/BenQ_MoonHalo/README.md, HTTP API.
  *
  * Author: RBILLC
  * Import URL: https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy
  *
- * Behaviour:
- * - bridgeLink: whether the Hub could reach the Bridge. Offline is a MoonHalo
- *   whose PC is off, like a bulb with no power; switch and level keep their
- *   last values. Any reply from the Bridge, a 500 included, is online.
- * - monitorLink: whether the Bridge could talk to the monitor over DDC/CI on
- *   its last attempt (ok, failed, unknown, unreachable), from the monitor
- *   object of every reply; the last error text and time are kept in state.
- *   Commands are always sent whatever it says. unreachable is set here while
- *   bridgeLink is offline: the Bridge's last word is not current. The first
- *   reply restores it.
- * - bridgeVersion (state): the version field of every reply, a 500 included.
- *   Older than MIN_BRIDGE_VERSION, or missing (Bridge 0.0.8 and earlier), is
- *   shown in place as "0.0.8 (Driver needs 0.0.9 or later)" with one warning;
- *   newer is never flagged. Retyping the address clears it.
+ * - bridgeLink: whether the Hub could reach the Bridge; any reply, a 500
+ *   included, is online. Offline leaves switch and level as they were.
+ * - monitorLink: the Bridge's last word on the monitor (ok, failed, unknown);
+ *   unreachable while bridgeLink is offline. Commands are sent regardless.
  * - Attribute events come only from the state in the Bridge's reply.
- * - setLevel's rate and setColorTemperature's tt go to the Bridge as
- *   transition (seconds; 0 snaps); without one, the Default transition
- *   preference (ms) goes as sweep; blank leaves the Bridge default.
- * - on() sends no level: the Bridge restores the level it remembers. Google
- *   Home sends setLevel then on() for one slider move.
- * - setColorTemperature while off turns the MoonHalo on, unless colour
+ * - setLevel's rate or setColorTemperature's tt goes to the Bridge as transition
+ *   (seconds; 0 snaps); without one the Default transition preference goes as sweep.
+ * - on() sends no level; the Bridge restores the level it remembers.
+ * - setColorTemperature while off turns the MoonHalo on unless colour
  *   pre-staging is enabled.
- * - No hardware knowledge lives here beyond the 1-7 step of setColorTempStep.
- * - The Bridge announces its LAN address through the Maker API
- *   (setBridgeAddress) at startup and every minute. It is used over the typed
- *   IP, and silence past the announcement timeout marks bridgeLink offline.
- *   Retyping the IP or port forgets the announced address.
- * - State: announcedIp/announcedPort; lastSeen/lastAnnounce readable, with
- *   epoch twins lastSeenAt/lastAnnounceAt for the timeout arithmetic;
- *   monitorLinkError/monitorLinkErrorAt; bridgeVersion.
+ * - The Bridge announces its address through the Maker API (setBridgeAddress);
+ *   it wins over the typed IP, and silence past the announcement timeout is offline.
+ * - State: announcedIp/announcedPort, lastSeen/lastAnnounce (epoch twins
+ *   lastSeenAt/lastAnnounceAt), lastMonitorError/lastMonitorErrorAt,
+ *   bridgeVersion, typedAddress.
  *
- * Version: 0.0.14 (pre-release; 1.0.0 on public announcement). The Bridge is versioned separately
- * and only moves when it changes; every reply reports its number (bridgeVersion).
- * Minimum Bridge version: 0.0.9 (MIN_BRIDGE_VERSION below). It moves only when the Driver starts
- * reading something an older Bridge does not send, never on a Bridge release alone.
+ * Version: 0.0.15 (pre-release; 1.0.0 on public announcement). The Bridge is versioned
+ * separately; every reply reports its number (bridgeVersion). Minimum Bridge version: 0.0.9
+ * (MIN_BRIDGE_VERSION); it moves only when the Driver reads something an older Bridge does not send.
  *
  * Changelog:
+ * 2026-10-08 0.0.15 - preferences renamed: timeoutSec -> requestTimeoutSec, ctMinKelvin -> warmKelvin,
+ *                     ctMaxKelvin -> coolKelvin, pollMinutes -> pollIntervalMin (retyped once, old
+ *                     settings removed on save); state monitorLinkError/monitorLinkErrorAt ->
+ *                     lastMonitorError/lastMonitorErrorAt (values carried over); comments trimmed,
+ *                     explanations moved to the Bridge README (issue #41)
  * 2026-09-16 0.0.14 - bridgeVersion state from the version field of every reply, checked against
  *                     the minimum Bridge version 0.0.9: too old or missing is shown in place with
  *                     one warning, newer is never flagged (issue #43)
@@ -126,10 +108,10 @@ metadata {
         input name: "bridgeIp", type: "text", title: "Bridge IP address (initial)", description: "IPv4 address of the PC running the MoonHalo Bridge; used only until the Bridge announces its own address", required: true
         input name: "bridgePort", type: "number", title: "Bridge port (initial)", defaultValue: 5000, range: "1..65535"
         input name: "announceTimeoutSec", type: "number", title: "Announcement timeout (seconds)", description: "Once the Bridge has announced its address, mark it offline when nothing has been heard from it for this long; 0 disables the check. Must exceed the Bridge's announce_seconds", defaultValue: 200, range: "0..86400"
-        input name: "timeoutSec", type: "number", title: "Request timeout (seconds)", defaultValue: 5, range: "1..30"
-        input name: "pollMinutes", type: "enum", title: "Poll interval", description: "How often the Hub asks the Bridge for its status", options: [["0": "Disabled"], ["1": "1 minute"], ["5": "5 minutes"], ["10": "10 minutes"], ["15": "15 minutes"], ["30": "30 minutes"]], defaultValue: "5"
-        input name: "ctMinKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
-        input name: "ctMaxKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
+        input name: "requestTimeoutSec", type: "number", title: "Request timeout (seconds)", defaultValue: 5, range: "1..30"
+        input name: "pollIntervalMin", type: "enum", title: "Poll interval", description: "How often the Hub asks the Bridge for its status", options: [["0": "Disabled"], ["1": "1 minute"], ["5": "5 minutes"], ["10": "10 minutes"], ["15": "15 minutes"], ["30": "30 minutes"]], defaultValue: "5"
+        input name: "warmKelvin", type: "number", title: "Warm colour temperature (Kelvin)", defaultValue: 2700, range: "1000..20000"
+        input name: "coolKelvin", type: "number", title: "Cool colour temperature (Kelvin)", defaultValue: 6500, range: "1000..20000"
         input name: "colorStaging", type: "bool", title: "Enable color pre-staging", description: "Store a colour temperature while the MoonHalo stays off", defaultValue: false
         input name: "defaultTransitionMs", type: "number", title: "Default transition (ms)", description: "Time a full brightness sweep takes when a command carries no rate, in whole milliseconds (0-60000; 0 snaps); blank uses the Bridge default", defaultValue: 300, range: "0..60000"
         input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
@@ -153,15 +135,17 @@ void updated() {
     log.warn "Bridge IP is: ${settings.bridgeIp}"
     log.warn "Bridge port is: ${prefInt('bridgePort', 5000)}"
     log.warn "announcement timeout is: ${announceTimeout()}s (0 = disabled)"
-    log.warn "request timeout is: ${prefInt('timeoutSec', 5)}s"
-    log.warn "poll interval is: ${settings.pollMinutes} minutes (0 = disabled)"
-    log.warn "warm colour temperature is: ${prefInt('ctMinKelvin', 2700)}K"
-    log.warn "cool colour temperature is: ${prefInt('ctMaxKelvin', 6500)}K"
+    log.warn "request timeout is: ${prefInt('requestTimeoutSec', 5)}s"
+    log.warn "poll interval is: ${settings.pollIntervalMin} minutes (0 = disabled)"
+    log.warn "warm colour temperature is: ${prefInt('warmKelvin', 2700)}K"
+    log.warn "cool colour temperature is: ${prefInt('coolKelvin', 6500)}K"
     log.warn "color pre-staging is: ${colorStaging == true}"
     log.warn "debug logging is: ${logEnable == true}"
     log.warn "description logging is: ${txtEnable == true}"
     purgeStaleAttributes()
+    purgeStaleSettings()
     ["lastLevel", "bridgeIp", "bridgePort"].each { String key -> state.remove(key) }
+    renameStaleState()
     forgetAnnouncedAddressIfTypedChanged()
     unschedule()
     schedulePoll()
@@ -170,11 +154,8 @@ void updated() {
     runIn(2, "refresh")
 }
 
-// Retyping the Bridge IP or port drops the announced address so the typed
-// one applies again until the Bridge's next announcement (within a minute):
-// the way out of a stale announced address once the announcer is switched
-// off. Saving any other preference leaves the announced address alone, so a
-// save never sends commands to a typed address that has gone stale.
+// Retyping the IP or port drops the announced address until the next
+// announcement; any other save keeps it (Bridge README, Letting the Hub find the Bridge).
 private void forgetAnnouncedAddressIfTypedChanged() {
     String typed = "${(settings.bridgeIp ?: '').toString().trim()}:${prefInt('bridgePort', 5000)}"
     String previous = state.typedAddress?.toString()
@@ -210,6 +191,25 @@ private void purgeStaleAttributes() {
     }
 }
 
+// Preferences renamed in 0.0.15 are new settings; the old ones linger until removed.
+private void purgeStaleSettings() {
+    ["timeoutSec", "ctMinKelvin", "ctMaxKelvin", "pollMinutes"].each { String name ->
+        try {
+            device.removeSetting(name)
+        } catch (Exception e) {
+            logDebug "could not remove setting ${name}: ${e.message}"
+        }
+    }
+}
+
+// State keys renamed in 0.0.15: carry the value over once, then drop the old key.
+private void renameStaleState() {
+    [monitorLinkError: "lastMonitorError", monitorLinkErrorAt: "lastMonitorErrorAt"].each { String from, String to ->
+        if (state[from] != null && state[to] == null) state[to] = state[from]
+        state.remove(from)
+    }
+}
+
 void logsOff() {
     log.warn "debug logging disabled..."
     device.updateSetting("logEnable", [value: "false", type: "bool"])
@@ -221,7 +221,7 @@ void parse(String description) {
 }
 
 private void schedulePoll() {
-    String minutes = (settings.pollMinutes ?: "5").toString()
+    String minutes = (settings.pollIntervalMin ?: "5").toString()
     switch (minutes) {
         case "1":
             runEvery1Minute("refresh")
@@ -259,10 +259,7 @@ private Integer announceTimeout() {
 // Commands
 // ---------------------------------------------------------------------------
 
-// No level is sent: the Bridge remembers the last level itself (persisted
-// across restarts) and applies it, or its configured default. Sending a
-// Driver-side copy raced Google Home's setLevel, which arrives just before
-// on() for a single slider move, and replayed the old level over the new.
+// No level is sent: the Bridge restores the level it remembers (Bridge README, /moonhalo/on).
 void on() {
     logDebug "on()"
     sendBridge("/moonhalo/on" + paceQuery(null), [command: "on"])
@@ -290,14 +287,13 @@ void setLevel(value, rate = null) {
     sendBridge("/moonhalo/brightness/${level}" + paceQuery(rate), [command: "setLevel", level: level])
 }
 
-// tt is forwarded like setLevel's rate, on both requests when a level is
-// given: brightness goes first and the colour request is sent from its
-// reply, so the MoonHalo is on (and pre-staging does not apply) by then.
+// tt travels like setLevel's rate, on both requests when a level is given:
+// brightness first, then colour from its reply, so the MoonHalo is on by then.
 void setColorTemperature(value, level = null, tt = null) {
     logDebug "setColorTemperature(${value}, ${level}, ${tt})"
     if (value == null) return
-    Integer ctMin = Math.max(1000, prefInt("ctMinKelvin", 2700))
-    Integer ctMax = Math.max(1000, prefInt("ctMaxKelvin", 6500))
+    Integer ctMin = Math.max(1000, prefInt("warmKelvin", 2700))
+    Integer ctMax = Math.max(1000, prefInt("coolKelvin", 6500))
     if (ctMin > ctMax) {
         Integer swap = ctMin
         ctMin = ctMax
@@ -338,10 +334,8 @@ void refresh() {
 // Bridge address announcements (Maker API)
 // ---------------------------------------------------------------------------
 
-// Called by the Bridge through the Maker API: GET
-// /apps/api/<app>/devices/<device>/setBridgeAddress/<ip>,<port>?access_token=...
-// Stores the address for sendBridge(), stamps the announcement time for
-// checkAnnounce(), and counts as proof the Bridge is up.
+// Called by the Bridge through the Maker API. Stores the address for sendBridge(),
+// stamps the time for checkAnnounce(), and counts as proof the Bridge is up.
 void setBridgeAddress(ip, port) {
     logDebug "setBridgeAddress(${ip}, ${port})"
     String address = (ip ?: "").toString().trim()
@@ -369,12 +363,8 @@ void setBridgeAddress(ip, port) {
     if (first) scheduleAnnounceCheck()
 }
 
-// Scheduled once a minute while the announcement timeout is enabled. Judges
-// liveness by the last time anything was heard from the Bridge, announcement
-// or reply, so announcements stopping while commands still work (announcer
-// switched off, token changed) never fight the successful replies. Nothing
-// happens until the first announcement has arrived, so a Bridge without the
-// Maker API values is judged by the status poll alone.
+// Once a minute while the timeout is enabled: offline when nothing, announcement
+// or reply, was heard within it. Idle until the first announcement has arrived.
 void checkAnnounce() {
     Integer timeout = announceTimeout()
     if (timeout <= 0) return
@@ -403,9 +393,8 @@ private String stageQuery() {
     return stage ? "?stage=1" : ""
 }
 
-// "?transition=<value>" when value (a rate or tt) is a number, else
-// "?sweep=<preference>" when Default transition is set, else "".
-// queryStarted: the path already carries "?stage=1", so use "&".
+// "?transition=<value>" when value (a rate or tt) is a number, else "?sweep=<preference>"
+// when Default transition is set, else ""; queryStarted means the path already has "?stage=1".
 private String paceQuery(Object value, Boolean queryStarted = false) {
     String separator = queryStarted ? "&" : "?"
     if (value != null) {
@@ -440,9 +429,8 @@ private String sweepSeconds() {
 // HTTP
 // ---------------------------------------------------------------------------
 
-// One asynchronous GET to the Bridge. Never blocks; a thrown exception
-// (bad URI, hub refusing the request) counts as the Bridge being offline.
-// The address the Bridge announced wins over the typed preferences.
+// One asynchronous GET to the Bridge; a thrown exception (bad URI, hub refusing the
+// request) counts as offline. The announced address wins over the typed preferences.
 private void sendBridge(String path, Map data) {
     Map callbackData = (data ?: [:])
     String command = callbackData.command ?: "request"
@@ -453,7 +441,7 @@ private void sendBridge(String path, Map data) {
     }
     Integer announcedPort = asInteger(state.announcedPort)
     Integer port = limitIntegerRange((announcedPort != null) ? announcedPort : prefInt("bridgePort", 5000), 1, 65535)
-    Integer timeout = limitIntegerRange(prefInt("timeoutSec", 5), 1, 30)
+    Integer timeout = limitIntegerRange(prefInt("requestTimeoutSec", 5), 1, 30)
     String uri = "http://${ip}:${port}${path}"
     callbackData = callbackData + [uri: uri]
     Map params = [uri: uri, contentType: "application/json", timeout: timeout]
@@ -465,9 +453,8 @@ private void sendBridge(String path, Map data) {
     }
 }
 
-// Any reply from the Bridge, a 500 included, keeps bridgeLink online: only
-// no reply, an unreadable body or one without "ok" marks it offline. The
-// AsyncResponse API is not documented, so every accessor is guarded.
+// Any reply, a 500 included, keeps bridgeLink online; no reply or a body without "ok"
+// marks it offline. The AsyncResponse API is undocumented, so every accessor is guarded.
 void bridgeCallback(resp, data) {
     String command = (data instanceof Map && data.command) ? data.command.toString() : "request"
     try {
@@ -499,9 +486,8 @@ void bridgeCallback(resp, data) {
     }
 }
 
-// The reply body as a map, or null. A non-2xx reply keeps its body on the
-// error side (errorData; errorJson has thrown on some hub versions), see
-// docs/research/hubitat-async-response-errors.md.
+// The reply body as a map, or null. A non-2xx reply keeps its body in errorData
+// (errorJson has thrown on some hubs); see docs/research/hubitat-async-response-errors.md.
 private Map parseReply(resp) {
     if (resp == null) return null
     Map json = readMap { resp.json }
@@ -538,9 +524,8 @@ private String replyFailure(resp) {
 // State and events
 // ---------------------------------------------------------------------------
 
-// Emits switch, level, colorTemperature and colorName from the
-// Bridge's state. Wording follows Hubitat's example drivers: "is" when the
-// value is unchanged, "was turned" / "was set to" when it changed.
+// switch, level, colorTemperature and colorName from the Bridge's state. Wording as in
+// Hubitat's example drivers: "is" when unchanged, "was turned" / "was set to" when changed.
 private void applyState(Map halo, Map data) {
     if (halo == null) {
         logDebug "reply carried no state"
@@ -600,9 +585,8 @@ private void emitEvent(String name, value, String unit, String descriptionText, 
     sendEvent(event)
 }
 
-// monitorLink from a reply's monitor object. One warning naming the error on
-// the transition to failed, debug on repeats, info on recovery; the last
-// error text and time go to state. switch and level are never touched.
+// monitorLink from a reply's monitor object: one warning on the transition to failed,
+// debug on repeats, info on recovery; the last error and its time go to state.
 private void applyMonitorLink(Object monitor) {
     if (!(monitor instanceof Map)) return
     Map reported = (Map) monitor
@@ -613,8 +597,8 @@ private void applyMonitorLink(Object monitor) {
     Boolean changed = current != value
     if (value == "failed") {
         String error = reported.error?.toString() ?: "no error given"
-        state.monitorLinkError = error
-        state.monitorLinkErrorAt = formatIso(reported.at?.toString()) ?: formatTime(now())
+        state.lastMonitorError = error
+        state.lastMonitorErrorAt = formatIso(reported.at?.toString()) ?: formatTime(now())
         if (changed) {
             log.warn "${name}: Monitor link failed (${error})"
         } else {
@@ -628,9 +612,8 @@ private void applyMonitorLink(Object monitor) {
     }
 }
 
-// bridgeVersion from a reply's version field. Below MIN_BRIDGE_VERSION, or
-// absent (Bridge 0.0.8 and earlier), it is shown in place with one warning on
-// the transition, debug on repeats; one info line when the value changes.
+// bridgeVersion from a reply's version field. Below MIN_BRIDGE_VERSION, or absent, it is
+// shown in place with one warning on the transition, debug on repeats; info when it changes.
 private void applyBridgeVersion(Object version) {
     String reported = version?.toString()?.trim() ?: "unknown"
     Boolean tooOld = !isVersionAtLeast(reported, MIN_BRIDGE_VERSION)
@@ -672,9 +655,7 @@ private List<Integer> versionSegments(String version) {
     return segments
 }
 
-// Offline is how a MoonHalo whose PC is powered down is shown. The warning
-// is logged once, on the transition; repeats go to debug. switch and level
-// are never touched here.
+// One warning on the transition to offline, debug on repeats; switch and level are untouched.
 private void markOffline(String reason) {
     String current = device.currentValue("bridgeLink", true)
     if (current != "offline") {
@@ -687,8 +668,8 @@ private void markOffline(String reason) {
     markMonitorUnreachable()
 }
 
-// The Bridge cannot be asked, so its last word about the monitor is not
-// current. monitorLinkError/monitorLinkErrorAt stay; the first reply restores.
+// The Bridge cannot be asked, so its last word about the monitor is not current.
+// lastMonitorError/lastMonitorErrorAt stay; the first reply restores monitorLink.
 private void markMonitorUnreachable() {
     String name = device.displayName
     if (device.currentValue("monitorLink", true) == "unreachable") return

@@ -124,7 +124,7 @@ class MoonHaloState:
 @dataclass(frozen=True)
 class Transition:
     """The Transition the Bridge applied (or is applying), for a reply:
-    `seconds` is the planned duration -- the explicit `transition` for a
+    `seconds` is the planned time -- the explicit `transition` for a
     total-time move, (n - 1) intervals for a Sweep-paced one -- and
     `steps` the number of D9 writes it takes (always 1 for an immediate
     change)."""
@@ -219,8 +219,8 @@ class Pacing:
 
     def schedule(self, steps_delta: int) -> tuple[int, float]:
         """The number of writes a move of `steps_delta` hardware steps
-        makes under this pacing, and the planned duration in seconds --
-        how long after the first write the last one is due (rounded to
+        makes under this Pacing, and the planned seconds -- how long
+        after the first write the last one is due (rounded to
         the millisecond) -- to report in the reply's Transition.
 
         No delta: zero writes; a total-time pacing still reports its
@@ -249,7 +249,7 @@ class _RampPlan:
     `steps` is every write the Ramp makes, in order, each a `(due_at,
     colortemp_step, brightness_step)` triple with `due_at` a
     `time.monotonic()` deadline; `next_index` is the index of the next one
-    not yet performed. `planned_seconds` is the duration the reply
+    not yet performed. `planned_seconds` is the time the reply
     reported (see `Pacing.schedule`), repeated by the same-target rule.
     `target_colortemp_step` and `target_brightness_step` are the Ramp's
     destination on each axis, for the completion/cancel log lines. `performed` records the writes actually made (a failed write is

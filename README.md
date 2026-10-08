@@ -83,18 +83,19 @@ Driver at an address by hand. The Maker API setup is described in the Bridge REA
   poll. One warning in the log on the transition to failed, then debug lines, then an info line
   on recovery; commands are always sent regardless. `unreachable` is set by the Driver whenever
   `bridgeLink` goes offline, since the Bridge's last word is no longer current; the first reply
-  after the Bridge is back restores the Bridge's own value, and `monitorLinkError` and
-  `monitorLinkErrorAt` are left as they were. The Bridge README's troubleshooting table lists
+  after the Bridge is back restores the Bridge's own value, and `lastMonitorError` and
+  `lastMonitorErrorAt` are left as they were. The Bridge README's troubleshooting table lists
   what to check when it stays failed.
 - **`bridgeAddress`** — the `ip:port` the Bridge last announced.
 - State variables on the device page: `announcedIp` and `announcedPort` (the announced
   address), `lastSeen` and `lastAnnounce` (readable times of the last reply and the last
   announcement, with `lastSeenAt` and `lastAnnounceAt` as their epoch-millisecond twins for
-  the timeout arithmetic), `monitorLinkError` and `monitorLinkErrorAt` (the last DDC/CI error
-  text and its time), `bridgeVersion` (the version the Bridge last reported, from every reply
-  including the status poll; a Bridge older than the Driver needs, or one from before 0.0.9
-  that sends no version, reads `0.0.8 (Driver needs 0.0.9 or later)` or `unknown (Driver needs
-  0.0.9 or later)` with one warning in the log; a newer Bridge is never flagged), and
+  the timeout arithmetic), `lastMonitorError` and `lastMonitorErrorAt` (the last DDC/CI error
+  text and its time, kept across recovery), `bridgeVersion` (the version the Bridge last
+  reported, from every reply including the status poll; a Bridge older than the Driver needs,
+  or one from before 0.0.9 that sends no version, reads `0.0.8 (Driver needs 0.0.9 or later)`
+  or `unknown (Driver needs 0.0.9 or later)` with one warning in the log; a newer Bridge is
+  never flagged; retyping the Bridge IP or port clears it until the next reply), and
   `typedAddress` (the typed preferences, to notice a retype).
 
 The PC side — installing and running the Bridge itself, its configuration file, and its

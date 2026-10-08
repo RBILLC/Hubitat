@@ -1189,7 +1189,7 @@ class TestBrightnessTransitionLogging(HttpTestCase):
 
         _wait_for_writes(self.port, 9, deadline=1.5)  # let the ramp settle
 
-    def test_sweep_paced_log_line_shows_the_planned_duration_and_write_count(self):
+    def test_sweep_paced_log_line_shows_the_planned_seconds_and_write_count(self):
         self.client.get("/moonhalo/brightness/1?transition=0")  # step 1
         response = self.client.get("/moonhalo/brightness/100?sweep=0.3")  # step 10
         self.assertEqual(response.status_code, 200)

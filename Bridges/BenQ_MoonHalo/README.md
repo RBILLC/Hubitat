@@ -164,14 +164,14 @@ send; a Bridge release on its own never moves it.
 
 | Endpoint | Parameters | Notes |
 |---|---|---|
-| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. If the halo is already on, this moves to the level exactly like `/moonhalo/brightness` (no D7 write; the same target as a running Ramp leaves it alone). From dark with a pace of `0` it snaps: D7 on, then one D9 write, as before. From dark otherwise it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level at the pace below. |
+| `GET /moonhalo/on` | `level` (query, optional, 1-100); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on at `level`, or the remembered last level, or `default_on_level`. If the halo is already on, this moves to the level exactly like `/moonhalo/brightness` (no D7 write; the same target as a running Ramp leaves it alone). From dark with a pace of `0` it snaps: D7 on, then one D9 write, as before. From dark otherwise it relights at the target colour and brightness step 1 (one D9 write), then D7 on, then rises to the level at the pace below. The Driver's `on()` sends no `level`: Google Home sends setLevel then on for one slider move, and a level carried by on replayed the old one over the new (Driver 0.0.7, issue #21). |
 | `GET /moonhalo/off` | `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo off. Leaves the remembered level and colour step untouched. With a pace of `0` (or if the halo is already off and dark), it snaps: D7 off alone, as before. Otherwise it dims out -- brightness ramps from the Applied step down to step 1 at the pace below -- then writes D7 off. |
 | `GET /moonhalo/brightness/<value>` | `<value>` 0-100 in the path; `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | `0` is equivalent to `/moonhalo/off`. Otherwise turns the halo on first if it was off, then moves to `<value>` at the pace below -- immediately if the pace is `0` or the move is at most one hardware step. |
 | `GET /moonhalo/colortemp/<value>` | `<value>` in the path (1-7 hardware step, or >= 1000 Kelvin); `stage` (query, optional, `1` to pre-stage); `transition` (query, optional, seconds 0-60); `sweep` (query, optional, seconds 0-60) | Turns the halo on first unless `stage=1`, in which case only the remembered colour step changes, no DDC write happens, and the pace is ignored. Otherwise moves to `<value>` at the pace below -- immediately if the pace is `0`. |
 
-**Pace.** The four rows above time a move the same way. `transition`, if present, is the total time this
+**Pacing.** The four rows above time a move the same way. `transition`, if present, is the total time this
 move takes, whatever its distance: intermediate steps are dropped evenly to fit (none closer than the
-monitor's ~60ms write pace), so a rule that passes a rate gets exactly that duration. Otherwise the
+monitor's ~60ms write pace), so a rule that passes a rate gets exactly that time. Otherwise the
 move is paced by distance from a Sweep time -- `sweep` if present, else `transition_seconds` -- the
 time a full nine-step brightness move takes: one write every ninth of it (floored at ~60ms), every
 step written when the Sweep time is `0.54` or more, so a move of n hardware steps ends after n - 1
@@ -217,7 +217,7 @@ The same command while the monitor is not answering replies with a 500:
 ```
 
 An on, off, brightness or colortemp reply always carries a `transition` object reporting the Transition actually
-applied: `seconds` is the planned duration (the `transition` value for a total-time move; `steps - 1` intervals for
+applied: `seconds` is the planned time (the `transition` value for a total-time move; `steps - 1` intervals for
 a Sweep-paced one, so `0.0` when it collapses to a single write), and
 `steps` is how many D9 writes it takes to get there -- `1` for an immediate change, `0` when no D9 write is needed:
 a staged colortemp call (`stage=1` while off) writes nothing at all, and off writes D7 alone when it snaps
@@ -258,7 +258,10 @@ rely on a DHCP reservation. Instead the Bridge tells the Hub where it is: throug
 every `announce_seconds` (default 60), and within a few seconds of its LAN address changing.
 The Driver then sends every command to the announced address, shows it in its `bridgeAddress`
 attribute, and marks the MoonHalo offline when the announcements stop for longer than its
-announcement timeout (default 200 seconds).
+announcement timeout (default 200 seconds). The call is
+`GET http://<hub_ip>/apps/api/<app id>/devices/<device id>/setBridgeAddress/<ip>,<port>?access_token=<token>`,
+the two command parameters comma-separated in the path (Hubitat staff,
+https://community.hubitat.com/t/25634).
 
 The address announced is the local address Windows would use to reach `hub_ip`, read from a
 UDP socket connected to the Hub without sending anything, so a Tailscale or other overlay
@@ -306,9 +309,13 @@ online; the device's events show the announcement.
 
 On the Hub side the Driver treats any reply from the Bridge as proof of life, not only
 announcements: once an announcement has ever arrived, the device goes offline only when
-nothing at all has been heard for the announcement timeout. Retyping the Bridge IP or port in
-the device's preferences forgets the announced address until the next announcement; saving
-other preferences keeps it.
+nothing at all has been heard for the announcement timeout, so announcements that stop while
+commands still work (the Maker values removed, the token changed) never fight the replies.
+Until the first announcement ever arrives the status poll alone judges the Bridge. Retyping the
+Bridge IP or port in the device's preferences forgets the announced address until the next
+announcement, which is the way out of a stale announced address once the announcer is switched
+off; saving other preferences keeps it, so a save never sends commands to a typed address that
+has gone stale.
 
 Leave the four Maker values out of `config.json` and nothing changes: the Driver keeps using
 the address typed in its preferences, exactly as before.
@@ -504,7 +511,7 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: HTTPError: HTTP Error 401` (or 404 / 500) | The Maker API rejected the call. 401 or 403: the token is wrong or **Allow Access via Local IP Address** is off. 404 or 500: the app id or device id is wrong, or the MoonHalo device is not selected in the Maker API app, or the Driver on the Hub is older than 0.0.8 and has no `setBridgeAddress` command. |
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `bridgeLink` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
-| The device page shows `monitorLink` failed with `BenQ RD280UG on \\.\DISPLAYn identified by EDID; DDC/CI not answering: ... (Win32 error -1071241854 = 0xC0262582)` (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails the same way, and `/health` is fine | The RD280UG is attached and Windows knows which monitor it is, but its DDC/CI link is stuck while the Bridge itself is healthy: the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) power-cycle the monitor at its button, or unplug and replug its cable -- Windows then takes the monitor as newly plugged in, which is what cleared it on 2026-09-16 at 22:19:53; (2) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. No task restart is needed: the next command after the link is back sets `monitorLink` ok. `monitorLinkError` and `monitorLinkErrorAt` on the device page hold the last error and its time. |
+| The device page shows `monitorLink` failed with `BenQ RD280UG on \\.\DISPLAYn identified by EDID; DDC/CI not answering: ... (Win32 error -1071241854 = 0xC0262582)` (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails the same way, and `/health` is fine | The RD280UG is attached and Windows knows which monitor it is, but its DDC/CI link is stuck while the Bridge itself is healthy: the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) power-cycle the monitor at its button, or unplug and replug its cable -- Windows then takes the monitor as newly plugged in, which is what cleared it on 2026-09-16 at 22:19:53; (2) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. No task restart is needed: the next command after the link is back sets `monitorLink` ok. `lastMonitorError` and `lastMonitorErrorAt` on the device page hold the last error and its time, kept across recovery. |
 | The device page shows `monitorLink` failed with `BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: ...`, and `state.monitor` reads `unknown` | Windows does not list the RD280UG as part of the desktop. On this PC the monitor's own standby does that, so this is the normal reading while it sleeps; it also covers the monitor switched off at its button or unplugged, which the Bridge cannot tell apart. Nothing is written and the command gets a 500. The next command after the monitor is back finds it again with no task restart; the text lists what is attached (`no EDID (\\.\DISPLAYn)` for a display Windows has no identity for). If the RD280UG is awake and still listed as not attached, `py -m moonhalo_bridge monitors` shows what Windows has for each display; a `product` other than `BNQ80BB` on the RD280UG means `monitor_product` must be set to it. |
 | The halo does nothing while every link reads healthy: `bridgeLink online`, `monitorLink ok`, `switch on` on the device page, `ok` replies with the expected writes in `bridge.log` | The writes are reaching a monitor that is not the RD280UG. The Monitor link only says a monitor acknowledged the last DDC/CI call, and nothing in a DDC/CI write says which monitor. Check `state.monitor` in `/moonhalo/status` (`curl http://localhost:5000/moonhalo/status`): it should read `BenQ RD280UG on \\.\DISPLAYn`. Anything else means `monitor_selector` is set to the wrong monitor (clear it to `null` and restart the task, so detection picks the RD280UG by its EDID identity), or `monitor_product` names another monitor. `py -m moonhalo_bridge monitors` prints every monitor with its identity and the same selection with its rule. Bridge 0.0.7 and earlier selected the Windows primary display when `monitor_selector` was `null`, which is how this happened on 2026-09-16 after a second monitor was added. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |

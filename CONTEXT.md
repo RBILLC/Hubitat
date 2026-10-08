@@ -68,6 +68,10 @@ _Avoid_: animation, interpolation
 The Transition a full nine-step brightness move takes. The Bridge's default pace and the Driver's Default transition preference are Sweep times: every move keeps the same interval between writes, a ninth of the Sweep time, so a short move finishes sooner. A Sweep time too short for every step at the monitor's write pace drops steps evenly rather than slowing down. A Transition passed with a command is instead the total time for that move.
 _Avoid_: default transition (when meaning the concept), rate, speed
 
+**Pacing**:
+The rule that times a Ramp: a Sweep time (the default, or a `sweep` passed with a command), under which every move keeps the same interval between writes, or a Transition passed with a command, which is the total time for that one move. Either resolved to zero snaps.
+_Avoid_: timing, speed, pace rule
+
 **Target state**:
 The MoonHalo setting most recently commanded. What the Bridge reports to the Hub, whether or not the Ramp has reached it.
 _Avoid_: requested state, desired state

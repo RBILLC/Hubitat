@@ -150,6 +150,16 @@ the monitor relights its halo by itself on wake, and the next off snaps instead 
 bookkeeping since #35, not #44). Next: #41 (Driver 0.0.15, last before 1.0.0), then the 1.0.0 bump and
 Steps 3 to 5; #45, #46, #26 later.
 
+Status 2026-10-08 evening (Step 2, #41): Driver 0.0.15 implemented on main (`/implement`, Bridge
+behaviour untouched, Bridge stays 0.0.10). Preferences `requestTimeoutSec`, `warmKelvin`, `coolKelvin`,
+`pollIntervalMin` (the old settings removed on save with `device.removeSetting`); state
+`lastMonitorError`/`lastMonitorErrorAt` (the old keys' values carried over on save, then removed);
+every Driver comment one or two lines, the explanations moved to the Bridge README (`/moonhalo/on`
+row, "Letting the Hub find the Bridge"); `CONTEXT.md` gains **Pacing** and "duration" is gone from
+`model.py`, `http.py` and the Bridge README; `.gitignore` confirmed (`probe_state.json` ignored);
+362 tests pass. Left to the user: import 0.0.15, save once, check the renamed preferences hold their
+retyped values and the old settings and state keys are gone; then close #41 and bump to 1.0.0.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
