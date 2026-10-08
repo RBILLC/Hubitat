@@ -4,82 +4,37 @@
  * Presents the MoonHalo backlight of a BenQ RD280UG monitor to the Hub as a
  * dimmable color-temperature light. Every command is one asynchronous HTTP
  * GET to the Bridge, the service on the PC the monitor is attached to; the
- * Bridge does the DDC/CI. Contract: Bridges/BenQ_MoonHalo/README.md, HTTP API.
+ * Bridge does the DDC/CI. The HTTP contract is the HTTP API section of
+ * Bridges/BenQ_MoonHalo/README.md.
  *
  * Author: RBILLC
  * Import URL: https://raw.githubusercontent.com/RBILLC/Hubitat/main/Drivers/BenQ_MoonHalo_Bridge_Driver.groovy
+ * License: MIT, see https://github.com/RBILLC/Hubitat/blob/main/LICENSE.txt
  *
+ * Behavior:
  * - bridgeLink: whether the Hub could reach the Bridge; any reply, a 500
  *   included, is online. Offline leaves switch and level as they were.
  * - monitorLink: the Bridge's last word on the monitor (ok, failed, unknown);
  *   unreachable while bridgeLink is offline. Commands are sent regardless.
  * - Attribute events come only from the state in the Bridge's reply.
  * - setLevel's rate or setColorTemperature's tt goes to the Bridge as transition
- *   (seconds; 0 snaps); without one the Default transition preference goes as sweep.
+ *   (seconds; 0 snaps). Without one, the Default transition preference goes as sweep.
  * - on() sends no level; the Bridge restores the level it remembers.
  * - setColorTemperature while off turns the MoonHalo on unless color
  *   pre-staging is enabled. The Kelvin goes to the Bridge as sent (floor 1000);
  *   the Bridge clamps it to its own kelvin_min..kelvin_max and maps it to a step.
  * - The Bridge announces its address through the Maker API (setBridgeAddress);
  *   it wins over the typed IP, and silence past the announcement timeout is offline.
- * - State: announcedIp/announcedPort, lastSeen/lastAnnounce (epoch twins
- *   lastSeenAt/lastAnnounceAt), lastMonitorError/lastMonitorErrorAt,
- *   bridgeVersion, typedAddress.
  *
- * Version: 0.0.16 (pre-release; 1.0.0 on public announcement). The Bridge is versioned
+ * Version: 0.0.17 (pre-release; 1.0.0 on public announcement). The Bridge is versioned
  * separately; every reply reports its number (bridgeVersion). Minimum Bridge version: 0.0.9
  * (MIN_BRIDGE_VERSION); it moves only when the Driver reads something an older Bridge does not send.
  *
  * Changelog:
- * 2026-10-08 0.0.16 - warmKelvin and coolKelvin preferences dropped (removed on save): the Bridge owns
- *                     the Kelvin range; every preference has a description; American spelling
- *                     throughout (issue #48)
- * 2026-10-08 0.0.15 - preferences renamed: timeoutSec -> requestTimeoutSec, ctMinKelvin -> warmKelvin,
- *                     ctMaxKelvin -> coolKelvin, pollMinutes -> pollIntervalMin (retyped once, old
- *                     settings removed on save); state monitorLinkError/monitorLinkErrorAt ->
- *                     lastMonitorError/lastMonitorErrorAt (values carried over); comments trimmed,
- *                     explanations moved to the Bridge README (issue #41)
- * 2026-09-16 0.0.14 - bridgeVersion state from the version field of every reply, checked against
- *                     the minimum Bridge version 0.0.9: too old or missing is shown in place with
- *                     one warning, newer is never flagged (issue #43)
- * 2026-09-16 0.0.13 - monitorLink reads unreachable while bridgeLink is offline, set in the same
- *                     event batch and restored by the first Bridge reply; monitorLinkError and
- *                     monitorLinkErrorAt are untouched (issue #42)
- * 2026-09-14 0.0.12 - bridgeLink replaces connectionState; monitorLink from the Bridge's monitor
- *                     object; a 500 keeps bridgeLink online; readable lastSeen/lastAnnounce and
- *                     announcedIp/announcedPort state (issue #39)
- * 2026-09-08 0.0.11 - Default transition is whole milliseconds, default 300: the decimal input would
- *                     not accept values under 1.0 on the device page (issue #37)
- * 2026-09-08 0.0.10 - Default transition (seconds) preference, sent as the sweep query parameter
- *                     when a command carries no rate (issue #37)
- * 2026-09-08 0.0.9 - setLevel's rate and setColorTemperature's tt are forwarded to the Bridge as
- *                    the transition query parameter (seconds; 0 snaps immediately) instead of being
- *                    ignored; a non-numeric or missing value still leaves the Bridge default in
- *                    place (issue #36)
- * 2026-09-07 0.0.8 - setBridgeAddress(ip, port) command and bridgeAddress attribute: the Bridge
- *                    announces its LAN address through the Maker API, the Driver prefers it over
- *                    the typed IP, and a missed announcement marks the Bridge offline (issue #23)
- * 2026-09-07 0.0.7 - on() sends /moonhalo/on and lets the Bridge restore its remembered level;
- *                    the Driver's own lastLevel copy is gone. Google Home sends setLevel then
- *                    on() for one slider move, and on() replayed the stale level (issue #21)
- * 2026-09-04 0.0.6 - connectionState is an attribute again (accepted by Google Home in 0.0.2);
- *                    no ColorMode: Hubitat's built-in Google Home app rejects colorMode without
- *                    full color and gives a CT-only driver no temperature trait (issue #21)
- * 2026-09-04 0.0.5 - Google Home typing test: colorMode "CT" back, still no custom attribute;
- *                    0.0.4 was accepted but typed as a plain dimmer (issue #21)
- * 2026-09-04 0.0.4 - Google Home typing test: attribute set reduced to the CT bulb's (switch,
- *                    level, colorTemperature, colorName); connectionState kept as a data value;
- *                    stale colorMode/connectionState attributes purged on save (issue #21)
- * 2026-09-04 0.0.3 - Restore ColorMode (colorMode "CT"): without it Google Home typed the device
- *                    as a plain dimmer with no color-temperature control; Initialize stays out
- *                    (issue #21)
- * 2026-09-04 0.0.2 - Drop ColorMode and Initialize capabilities: still rejected by Hubitat's
- *                    Google Home app with Bulb alone; accepted CT-only drivers declare neither
- *                    (issue #21)
- * 2026-09-04 0.0.1 - Declare Bulb instead of Light: Hubitat's Google Home app rejected the
- *                    device ("not supported by Google Home"); its own CT-only example driver and
- *                    docs use Bulb (issue #21)
- * 2026-09-04 0.0.0 - Initial pre-release (issue #19)
+ * 2026-10-08 0.0.17 - header: MIT license line, Behavior label on the notes, State bullet dropped,
+ *                     contract pointer and transition note reworded (issue #49)
+ * 2026-09-04 to 2026-10-08, 0.0.0 to 0.0.16 - pre-release on the author's hub; history in git
+ *                     (issues #19, #21, #23, #36, #37, #39, #41, #42, #43, #48)
  */
 
 import groovy.transform.Field
@@ -95,7 +50,6 @@ metadata {
         capability "ColorTemperature"
         capability "Bulb"
         capability "Refresh"
-
 
         attribute "bridgeLink", "enum", ["unknown", "online", "offline"]
         attribute "monitorLink", "enum", ["unknown", "ok", "failed", "unreachable"]
