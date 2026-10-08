@@ -208,6 +208,11 @@ American throughout, the Bridge README and CONTEXT.md unchanged). Five boxes tic
 0.0.16, save once, no Kelvin preferences on the device page, `setColorTemperature(3000)` still works; then close
 #48. The 1.0.0 bump stays PARKED; when it comes, the Driver changelog starts from 0.0.16. #45, #26 later.
 
+Status 2026-10-08 evening, last: #48 CLOSED after the hub check (0.0.16 imported and saved; the Preferences tab
+shows the nine preferences with the new text and no Kelvin ones; hub default transition is 500 ms). Hub runs
+Driver 0.0.16, PC runs Bridge 0.0.12; main is pushed and clean. Nothing queued. NEXT when the user says so: the
+1.0.0 bump (Step 2 tail), then Steps 3 to 5 under #38. #45, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
