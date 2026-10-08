@@ -139,6 +139,17 @@ answers in 88 ms with both displays' product, name and serial and `selected: Ben
 after a wake inside the 5 s timeout; standby reads not-attached and recovers with no restart), `/health`
 0.0.10 on the device page; then close #44, then #41, then 1.0.0.
 
+Status 2026-10-08 midday: #44 CLOSED after the hub check. Task restarted on 0.0.10 (`schtasks /end` then
+`/run`; the hub logged `Bridge version 0.0.10` with no warning). Standby forced per monitor with
+`DisplaySwitch.exe /internal` (the RD280UG leaves the desktop and sleeps) and `/extend` to bring it back;
+a PowerShell display-off message is no use here, both monitors woke at once. While asleep: `monitorLink`
+failed with the not-attached text, `state.monitor` unknown. On wake: detection `by edid` and the first
+command 67 ms apart, the hub logged `Monitor link ok` with no 408 and no `bridgeLink` offline. Side finding
+[#46](https://github.com/RBILLC/Hubitat/issues/46) (needs-triage): an off sent during standby writes nothing,
+the monitor relights its halo by itself on wake, and the next off snaps instead of dimming out (model
+bookkeeping since #35, not #44). Next: #41 (Driver 0.0.15, last before 1.0.0), then the 1.0.0 bump and
+Steps 3 to 5; #45, #46, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
