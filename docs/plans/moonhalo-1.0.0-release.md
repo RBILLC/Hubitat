@@ -104,6 +104,15 @@ Order, decided by the user 2026-09-16 late night: #44 first (research, then gril
 /implement), #41 last (Driver 0.0.15; the clean-up closes the code, so nothing lands after it), then the
 1.0.0 bump.
 
+Status 2026-10-08: nothing shipped since 09-16; Bridge 0.0.9 and Driver 0.0.14 have run three weeks with
+the Monitor link ok. The user reports the halo is slow to answer the first command after the monitor is
+turned on. `bridge.log` explains it: a monitor in standby drops out of the display enumeration, so every
+wake re-runs detection, and the capabilities reads cost 5.15 s (RD280UG) and 2.91 s (PD2700U), 7.9 s in
+all, past the Driver's 5 s request timeout (one 408 and a one-cycle `bridgeLink` offline per wake). The
+research note shows the EDID identity is free from `EnumDisplayDevices`, so #44 is now the fix for both
+the slowness and the stuck-link reporting; its scope is restated in a comment on the ticket. Next:
+/grill-with-docs on #44, then /implement as Bridge 0.0.10, hub check; then #41; then 1.0.0.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
