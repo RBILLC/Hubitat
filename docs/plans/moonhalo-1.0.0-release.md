@@ -220,7 +220,9 @@ tests. Decisions: MIT (LICENSE.txt is already MIT), `Author: RBILLC` stays, the 
 [#49](https://github.com/RBILLC/Hubitat/issues/49) (ready-for-agent, Driver 0.0.17, comments only; steps and
 acceptance in the ticket). The changelog squash waits for the 1.0.0 bump as a sub-bullet of #38's clean-up step; the
 preference-rename step in #38 is ticked (done in 0.0.15 and 0.0.16). QUEUED: /clear, then /implement #49, push,
-import on the hub, save once, close. 1.0.0 stays PARKED. #45, #26 later.
+import on the hub, save once, close. 1.0.0 stays PARKED. #45, #26 later. Added later the same evening: #49
+also changes the first line of LICENSE.txt to `Copyright (c) 2025-2026 Rothenberg Industries, LLC` (the user owns the
+LLC, registered in NY; the holder name was the agent's call).
 
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
