@@ -178,6 +178,8 @@ writes fail alike; version examples 0.0.11. 342 tests pass (362 minus the 21 del
 test). Left to the user: restart the task on 0.0.11, `py -m moonhalo_bridge monitors` still selects
 `by edid`, the hub shows `Bridge version 0.0.11` with no warning; then close #47 and bump to 1.0.0.
 
+Status 2026-10-08 night: #47 CLOSED after the PC check. The task restarted on 0.0.11 at 15:15 (`schtasks /end` then `/run`): `/health` reported 0.0.11, `monitors` selected `BenQ RD280UG on \\.\DISPLAY1 (by edid)`, `bridge.log` showed detection by edid and the announcement; the hub logged `Bridge version 0.0.11` once at 15:17:02 and the device page showed it after a reload (the State Variables block is a page-load snapshot, not live). `/code-review` found nothing to fix. The 1.0.0 bump is PARKED by the user until they say so; nothing is queued. #45, #46, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
