@@ -274,6 +274,10 @@ the final verification before the bump remains under #38. #45, #26 later.
   control), known limits (ten brightness levels and seven colour steps in hardware; Windows only; the
   Bridge must run in the logged-on session because of session 0).
 - Link the raw Driver URL and `Bridges/BenQ_MoonHalo/README.md`. The user posts it.
+- Conventions of the category (title `[RELEASE] Name - descriptor`, one thread per product with the first post
+  edited for updates, sections, raw URL plus repo link, HPM optional, what first replies ask) and a skeleton
+  post: `docs/research/hubitat-release-post-conventions.md` (2026-10-08). Requested by the user the same
+  evening with a README review; next session: `/grill-with-docs` on Steps 3 and 4 together, then implement.
 
 ## Step 4: GitHub page clean-up
 
