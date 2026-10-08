@@ -46,8 +46,8 @@ left out of `config.json` simply uses it.
 | `host` | `"0.0.0.0"` | Address the Bridge listens on. `0.0.0.0` means every interface, and the address announced to the Hub is then the one that routes to `hub_ip`; a specific address is announced as typed. `127.0.0.1` disables the announcement, since the Hub could never reach it. |
 | `port` | `5000` | TCP port the Bridge listens on. |
 | `default_on_level` | `50` | Level (1-100) used by `/moonhalo/on` when no level is given and none is remembered. |
-| `monitor_selector` | `null` | Manual override of which monitor the Bridge writes to: a case-insensitive substring of a monitor's device name (`DISPLAY1`) or description. `null` (the normal setting) lets the Bridge detect the monitor by `monitor_model` below. Set it only when detection cannot tell the monitors apart; the device name is then the handle, since descriptions can be identical (on 2026-09-16 both a PD2700U and the RD280UG reported `Generic PnP Monitor`). A device name names a Windows port, not the monitor: a cable move or a driver update can renumber it silently. A selector that matches nothing is an error, not a fallback to the first monitor. |
-| `monitor_model` | `"RD280UG"` | The `model(...)` the Bridge looks for in each attached monitor's DDC/CI capabilities string when `monitor_selector` is `null`, as a case-insensitive substring. See **What the Bridge assumes** below for how detection runs and what it does when nothing matches. |
+| `monitor_selector` | `null` | Manual override of which monitor the Bridge writes to: a case-insensitive substring of a monitor's device name (`DISPLAY1`) or description. `null` (the normal setting) lets the Bridge detect the monitor by its EDID identity, `monitor_product` below. Set it only when detection cannot tell the monitors apart (two monitors with the same product); the device name is then the handle, since descriptions can be identical (on 2026-09-16 both a PD2700U and the RD280UG reported `Generic PnP Monitor`). A device name names a Windows port, not the monitor: a cable move or a driver update can renumber it silently (Windows swapped `DISPLAY1` and `DISPLAY2` on 2026-10-07). A selector that matches nothing is an error, not a fallback to the first monitor. |
+| `monitor_product` | `"BNQ80BB"` | The EDID identity the Bridge looks for among the attached monitors when `monitor_selector` is `null`: the three manufacturer letters followed by the four-digit product code, compared case-insensitively. `BNQ80BB` is the RD280UG; `py -m moonhalo_bridge monitors` prints every attached monitor's product next to its EDID name, which is how to find another monitor's. Replaces `monitor_model` (Bridge 0.0.8 to 0.0.9), which is ignored if still present. See **What the Bridge assumes** below for how detection runs and what it does when nothing matches. |
 | `state_file` | `"state.json"` | Where remembered state is persisted. Relative paths resolve against the config file's own folder. |
 | `log_file` | `"bridge.log"` | Where request log lines are written, relative to the config folder. Keep a file: the logon task runs windowless, so `null` (stderr) would discard the log. |
 | `default_brightness_step` | `5` | Brightness step (1-10) used the first time a colour-only write needs the "other half" of the register and no state can be read from the monitor. |
@@ -128,7 +128,7 @@ always has the same shape:
 | `brightnessStep` | Hardware brightness step, 1-10. |
 | `colorTempStep` | Hardware colour step, 1-7 (1 warm). |
 | `colorTemperature` | Colour temperature in Kelvin. |
-| `monitor` | Which monitor the Bridge writes to: `"<model> on <device name>"` from detection, for example `RD280UG on \\.\DISPLAY1`; `"<description> on <device name>"` with a `monitor_selector`; `"unknown"` when no monitor has been chosen (none matched, or none attached). This is the field to check when every link reads healthy but the halo does nothing. |
+| `monitor` | Which monitor the Bridge writes to: `"<EDID name> on <device name>"` from detection, for example `BenQ RD280UG on \\.\DISPLAY1` (the product, `BNQ80BB on \\.\DISPLAY1`, for a monitor whose EDID carries no name); `"<description> on <device name>"` with a `monitor_selector`; `"unknown"` when no monitor has been chosen (the RD280UG is not attached, or nothing is). This is the field to check when every link reads healthy but the halo does nothing. |
 
 Next to `state`, every reply the monitor had a hand in -- `/moonhalo/status`, `/health`, each
 success reply and the 500 body of a failed command -- carries the **Monitor link** as one
@@ -142,7 +142,7 @@ Bridge never sends it.
 | Field | Meaning |
 |---|---|
 | `link` | `"unknown"` until the first DDC/CI call after start-up, then `"ok"` after any success or `"failed"` after any failure. Failed says only that the last attempt failed: a stuck link and DDC/CI switched off in the monitor's OSD look the same. |
-| `error` | The error text of the last failure, for example `SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)`; `null` when the link is `ok` or `unknown`. |
+| `error` | The error text of the last failure; `null` when the link is `ok` or `unknown`. A failure on the detected monitor names it first, for example `BenQ RD280UG on \\.\DISPLAY1 identified by EDID; DDC/CI not answering: SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)` (the Win32 code is printed as decimal and hex); a monitor that is not attached reads `BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: BenQ PD2700U BNQ802E (\\.\DISPLAY2)`. |
 | `at` | When the last attempt was made, ISO 8601 with the PC's UTC offset; `null` until the first. |
 
 The same replies carry the Bridge's own version next to `monitor`, so the Hub can see which
@@ -150,7 +150,7 @@ Bridge it is talking to once the two pieces are upgraded separately:
 
 | Field | Meaning |
 |---|---|
-| `version` | The Bridge version, `"0.0.9"`, the same number `/health` has always reported. The Driver keeps it as the `bridgeVersion` state variable on the device page, taken from every reply including the status poll and a 500. |
+| `version` | The Bridge version, `"0.0.10"`, the same number `/health` has always reported. The Driver keeps it as the `bridgeVersion` state variable on the device page, taken from every reply including the status poll and a 500. |
 
 **Versions.** The Driver and the Bridge are versioned separately; each moves only when it changes.
 The Driver declares the oldest Bridge it can read (`0.0.9` for Driver 0.0.14, the first Bridge to
@@ -180,7 +180,7 @@ sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the s
 rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state, the Bridge version and the Monitor link; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.9", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.10", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -193,10 +193,10 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "brightnessStep": 5,
     "colorTempStep": 4,
     "colorTemperature": 4600,
-    "monitor": "RD280UG on \\\\.\\DISPLAY1"
+    "monitor": "BenQ RD280UG on \\\\.\\DISPLAY1"
   },
   "transition": {"seconds": 0.0, "steps": 1},
-  "version": "0.0.9",
+  "version": "0.0.10",
   "monitor": {"link": "ok", "error": null, "at": "2026-09-14T17:56:03-04:00"}
 }
 ```
@@ -206,11 +206,11 @@ The same command while the monitor is not answering replies with a 500:
 ```json
 {
   "ok": false,
-  "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
-  "version": "0.0.9",
+  "error": "BenQ RD280UG on \\\\.\\DISPLAY1 identified by EDID; DDC/CI not answering: SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)",
+  "version": "0.0.10",
   "monitor": {
     "link": "failed",
-    "error": "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)",
+    "error": "BenQ RD280UG on \\\\.\\DISPLAY1 identified by EDID; DDC/CI not answering: SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)",
     "at": "2026-09-14T17:40:12-04:00"
   }
 }
@@ -230,7 +230,7 @@ curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
 ```
 
 ```json
-{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}, "version": "0.0.9", "monitor": {"...": "..."}}
+{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}, "version": "0.0.10", "monitor": {"...": "..."}}
 ```
 
 The same move from step 1 with `sweep=0.9` (or `transition_seconds` 0.9 and no query) reports
@@ -325,10 +325,19 @@ py -m moonhalo_bridge write D7 544
 py -m moonhalo_bridge --monitor DISPLAY2 read D9
 ```
 
-`monitors` lists every attached physical monitor, then which one the Bridge would write to and
-by which rule, for example `selected: RD280UG on \\.\DISPLAY1 (by model)` or `selected: none
-(no monitor with model RD280UG among: PD2700U (\\.\DISPLAY2))`; with a real monitor this reads
-each monitor's capabilities, which can take a few seconds. `read <code>` reads a VCP register
+`monitors` lists every attached physical monitor with its EDID identity, then which one the
+Bridge would write to and by which rule, with no DDC/CI call (it answers in well under a second):
+
+```
+device=\\.\DISPLAY1 primary=False product=BNQ80BB name='BenQ RD280UG' serial='EMS6T00258087' description='Generic PnP Monitor'
+device=\\.\DISPLAY2 primary=True product=BNQ802E name='BenQ PD2700U' serial='ETSCL07402SL0' description='Generic PnP Monitor'
+selected: BenQ RD280UG on \\.\DISPLAY1 (by edid)
+```
+
+The `product` column is the cross-reference for `monitor_product`: the product code next to the
+monitor's own name. A display Windows has no EDID for prints `product=none name=none serial=none`.
+With the RD280UG in standby the last line reads `selected: none (BenQ RD280UG (BNQ80BB) is not
+attached: asleep, off or unplugged; attached: BenQ PD2700U BNQ802E (\\.\DISPLAY2))`. `read <code>` reads a VCP register
 given as hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>`
 writes a value (decimal or `0x`-hex) to a VCP register and reads it back to confirm. All four
 act on the detected monitor (see **What the Bridge assumes**); `--monitor <selector>` before the
@@ -488,15 +497,16 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 
 | Symptom | Likely cause / fix |
 |---|---|
-| `monitors` prints "No monitors found." or `write`/`read` fails with "No display monitors found" | The monitor is not attached, is asleep, or its cable does not carry DDC/CI. Check the cable and that the monitor is not in a low-power state. |
+| `monitors` prints "No monitors found." or `write`/`read` fails with "No display monitors found" | No monitor at all is attached to the desktop: every one is asleep, off or unplugged. The RD280UG alone missing reads `... is not attached` instead (see below). |
 | A DDC/CI call fails with a large error code (formatted as a decimal, but corresponding to a hex value in the `0xC026xxxx` range) | This is a Windows Graphics Kernel DDC/CI channel error, often transient on this monitor. Reads already retry three times; a `write` is not retried, so simply try the command again. Persistent errors suggest a cable or connection problem rather than the Bridge. |
 | `GET` requests get `{"ok": false, "error": "forbidden"}` with a 403 | The caller's IP is not in `allowed_ips`, and its MAC (resolved through the PC's ARP table with `arp -a <ip>`) is not in `allowed_macs`. Confirm the Hub's IP and MAC in `config.json`, and that the PC has recently exchanged traffic with the Hub so the OS ARP cache has an entry for it — a stale or absent entry resolves to no MAC and is denied. `/health` is exempt from this check and always answers. |
 | `serve` fails to start, e.g. "port in use" / `OSError: [WinError 10048]` | Another process (perhaps a previous `serve` still running, or the NSSM service) is already bound to `config.json`'s `port`. Stop it first (`nssm stop MoonHaloBridge`, or find and end the other `python.exe`/`pythonw.exe` process), or change `port` in `config.json`. |
 | `bridge.log` shows `announcement of ... failed: HTTPError: HTTP Error 401` (or 404 / 500) | The Maker API rejected the call. 401 or 403: the token is wrong or **Allow Access via Local IP Address** is off. 404 or 500: the app id or device id is wrong, or the MoonHalo device is not selected in the Maker API app, or the Driver on the Hub is older than 0.0.8 and has no `setBridgeAddress` command. |
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `bridgeLink` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
-| The device page shows `monitorLink` failed (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails with `Win32 error -1071241854`, and `/health` is fine | The Monitor link is down while the Bridge itself is healthy; the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (2) power-cycle the monitor at its button; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. `monitorLinkError` and `monitorLinkErrorAt` on the device page hold the last error and its time; the first command after the link is back sets `monitorLink` ok. |
-| The halo does nothing while every link reads healthy: `bridgeLink online`, `monitorLink ok`, `switch on` on the device page, `ok` replies with the expected writes in `bridge.log` | The writes are reaching a monitor that is not the RD280UG. The Monitor link only says a monitor acknowledged the last DDC/CI call, and nothing in a DDC/CI write says which monitor. Check `state.monitor` in `/moonhalo/status` (`curl http://localhost:5000/moonhalo/status`): it should read `RD280UG on \\.\DISPLAYn`. Anything else means `monitor_selector` is set to the wrong monitor (clear it to `null` and restart the task, so detection picks the RD280UG by its capabilities), or `monitor_model` does not match. `py -m moonhalo_bridge monitors` prints every monitor and the same selection with its rule. Bridge 0.0.7 and earlier selected the Windows primary display when `monitor_selector` was `null`, which is how this happened on 2026-09-16 after a second monitor was added. |
+| The device page shows `monitorLink` failed with `BenQ RD280UG on \\.\DISPLAYn identified by EDID; DDC/CI not answering: ... (Win32 error -1071241854 = 0xC0262582)` (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails the same way, and `/health` is fine | The RD280UG is attached and Windows knows which monitor it is, but its DDC/CI link is stuck while the Bridge itself is healthy: the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) power-cycle the monitor at its button, or unplug and replug its cable -- Windows then takes the monitor as newly plugged in, which is what cleared it on 2026-09-16 at 22:19:53; (2) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. No task restart is needed: the next command after the link is back sets `monitorLink` ok. `monitorLinkError` and `monitorLinkErrorAt` on the device page hold the last error and its time. |
+| The device page shows `monitorLink` failed with `BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: ...`, and `state.monitor` reads `unknown` | Windows does not list the RD280UG as part of the desktop. On this PC the monitor's own standby does that, so this is the normal reading while it sleeps; it also covers the monitor switched off at its button or unplugged, which the Bridge cannot tell apart. Nothing is written and the command gets a 500. The next command after the monitor is back finds it again with no task restart; the text lists what is attached (`no EDID (\\.\DISPLAYn)` for a display Windows has no identity for). If the RD280UG is awake and still listed as not attached, `py -m moonhalo_bridge monitors` shows what Windows has for each display; a `product` other than `BNQ80BB` on the RD280UG means `monitor_product` must be set to it. |
+| The halo does nothing while every link reads healthy: `bridgeLink online`, `monitorLink ok`, `switch on` on the device page, `ok` replies with the expected writes in `bridge.log` | The writes are reaching a monitor that is not the RD280UG. The Monitor link only says a monitor acknowledged the last DDC/CI call, and nothing in a DDC/CI write says which monitor. Check `state.monitor` in `/moonhalo/status` (`curl http://localhost:5000/moonhalo/status`): it should read `BenQ RD280UG on \\.\DISPLAYn`. Anything else means `monitor_selector` is set to the wrong monitor (clear it to `null` and restart the task, so detection picks the RD280UG by its EDID identity), or `monitor_product` names another monitor. `py -m moonhalo_bridge monitors` prints every monitor with its identity and the same selection with its rule. Bridge 0.0.7 and earlier selected the Windows primary display when `monitor_selector` was `null`, which is how this happened on 2026-09-16 after a second monitor was added. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |
 | A transition looks stepped | The MoonHalo only has ten brightness levels, so any Ramp is at most nine visible hardware-step writes no matter how long it takes. The steps read best back-to-back at the monitor's ~60ms write pace: a default-paced move (`transition_seconds`, or the Driver's **Default transition (ms)** preference as `sweep`) keeps that pace at any Sweep time of `0.54` or less, writing fewer of the nine steps the shorter it is (six at `0.3`, which looked smooth on the real halo); a longer Sweep time spaces the writes out, which is what reads as stepping. An explicit `transition` from a rule is a total time and spreads its writes over exactly that, so a long one steps visibly too -- pass a shorter time or none at all. This applies to dimming out and rising too (`/moonhalo/off` and `/moonhalo/on`). The ten levels themselves are a hardware limit, not a bug in the Bridge. |
 | `bridge.log` shows `ramp aborted` | A Ramp's final write failed twice (the first attempt and one retry) -- a DDC/CI channel error persisted through both. The halo may be sitting one hardware step short of the Level it last reported. The Bridge does not retry further or tell the Hub, since its request was already answered; the next brightness or colour command reads D9 fresh before making its first write, rather than trusting the step it could not confirm was applied. |
@@ -509,24 +519,32 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
   Bridge cannot tell a stuck link from DDC/CI switched off in the OSD; either shows as a failed
   Monitor link.
 - **There is one RD280UG.** With `monitor_selector` `null`, the Bridge picks the monitor to write
-  to by what it is, not by which display Windows calls primary: it reads each attached monitor's
-  DDC/CI capabilities string (three attempts 50ms apart, as `capabilities` does) and keeps the
-  one whose `model(...)` contains `monitor_model`. If the capabilities read fails on every
-  monitor it falls back to the D9 probe: the monitor whose D9 read (the MoonHalo's own register)
-  returns a non-zero maximum, which the PD2700U for one does not. Two model matches are broken
-  by the same probe; still ambiguous, the first is taken and one warning names the candidates. A
-  model match whose D9 maximum is zero (or whose D9 read fails) stands, with a warning.
+  to by its EDID identity, not by which display Windows calls primary and not by its port: the
+  attached monitor whose EDID product is `monitor_product` (`BNQ80BB`), whatever `\\.\DISPLAYn` it
+  is on. The identity is what Windows read from the monitor when it was plugged in: for each
+  attached display, `EnumDisplayDevices` gives the monitor's device interface path, and the
+  registry caches its EDID under that path (`HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<PnP
+  ID>\<instance>\Device Parameters\EDID`); the Bridge parses the manufacturer letters, product
+  code, name and serial from those bytes (research:
+  `docs/research/windows-monitor-identity-without-ddc.md`). No DDC/CI call is made to detect: the
+  first write, or the D9 read that resolves an unknown step, is the first DDC/CI call and sets the
+  Monitor link. One match is rule `edid`; two monitors with the same product take the first in
+  Windows' enumeration order (`first-of-ambiguous`) with one warning naming both (several RD280UGs
+  on one PC is [#45](https://github.com/RBILLC/Hubitat/issues/45)). A matching monitor whose EDID
+  has no name descriptor is labelled by its product (`BNQ80BB on \\.\DISPLAY1`).
   Detection runs at start-up and again whenever the set of attached display names differs from
-  the set seen last time, so a cable swap while running corrects itself on the next command. A
-  miss stands for 30 seconds while the display set is unchanged, then detection is tried again:
-  each miss costs a capabilities read per monitor (2.8 s on a PD2700U), and detecting on every
-  command made a queued command outlast the Driver's request timeout. When no monitor matches, nothing is written: the
-  command gets a 500, the Monitor link goes `failed` with an error such as `no monitor with model
-  RD280UG among: PD2700U (\\.\DISPLAY2)`, and `/moonhalo/status` reports the same. One
-  `bridge.log` line per detection says what was chosen, by which rule (`model`, `d9-probe`,
-  `tie-break`, `first-of-ambiguous` or `selector`) and the candidates seen; a miss is logged as a
-  warning with the reason. Start-up can take a few seconds longer for the capabilities reads
-  (Microsoft: "sometimes it can take several seconds to complete").
+  the set seen last time, so a cable swap while running corrects itself on the next command; a
+  miss is tried again on every call (a registry read per monitor, no cooldown). A monitor in
+  standby is not attached on this PC, so every wake re-detects; that now costs nothing the Hub can
+  notice (Bridge 0.0.9 read each monitor's capabilities string, 5 to 8 s, past the Driver's
+  request timeout). When no monitor matches, nothing is written: the command gets a 500, the
+  Monitor link goes `failed` with `BenQ RD280UG (BNQ80BB) is not attached: asleep, off or
+  unplugged; attached: BenQ PD2700U BNQ802E (\\.\DISPLAY2)`, and `/moonhalo/status` reports the
+  same. One `bridge.log` line per display set says what was chosen, by which rule (`edid`,
+  `first-of-ambiguous` or `selector`) and the candidates seen as `<name> <product> (<device>)`; a
+  miss is logged as a warning once per reason. A DDC/CI failure on the detected monitor is
+  reported with the monitor in front (`BenQ RD280UG on \\.\DISPLAY1 identified by EDID; DDC/CI
+  not answering: ...`), so a stuck link is never mistaken for an absent monitor.
 
 ## Checking a Ramp on the real halo
 

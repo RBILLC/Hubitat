@@ -1805,7 +1805,7 @@ class TestMonitorLinkReplies(HttpTestCase):
 
     def test_state_still_carries_the_monitor_label(self):
         body = self.client.get("/moonhalo/status").get_json()
-        self.assertEqual(body["state"]["monitor"], "RD280UG on DRYRUN1")
+        self.assertEqual(body["state"]["monitor"], "BenQ RD280UG on DRYRUN1")
 
 
 class TestMonitorLinkOnRampWrites(HttpTestCase):
@@ -1869,21 +1869,25 @@ class TestMonitorLinkOnRampWrites(HttpTestCase):
 
 
 class TestMonitorDetectionOverHttp(unittest.TestCase):
-    """Issue #40, as the Hub sees it: with two monitors of one description
-    where the primary is not the RD280UG, writes reach the RD280UG and
-    `state.monitor` names it; with no RD280UG attached a command gets a
-    500 whose Monitor link names the model looked for and the models
-    seen, and `/moonhalo/status` reports the same; a display set that
-    changes between calls is detected afresh on the next call."""
+    """Issues #40 and #44, as the Hub sees it: with two monitors of one
+    description where the primary is not the RD280UG, writes reach the
+    RD280UG and `state.monitor` names it by its EDID name; with no RD280UG
+    attached a command gets a 500 whose Monitor link says it is not
+    attached and names what is, and `/moonhalo/status` reports the same;
+    a display set that changes between calls is detected afresh on the
+    next call; a DDC/CI failure on the identified monitor names it."""
 
     DISPLAY1 = "\\\\.\\DISPLAY1"
     DISPLAY2 = "\\\\.\\DISPLAY2"
     GENERIC = "Generic PnP Monitor"
+    NOT_ATTACHED = "BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: "
 
     @classmethod
     def rd280ug(cls, device_name: str, primary: bool = False) -> FakeMonitor:
         return FakeMonitor(
-            MonitorInfo(device_name=device_name, primary=primary, description=cls.GENERIC),
+            MonitorInfo(
+                device_name, primary, cls.GENERIC, product="BNQ80BB", name="BenQ RD280UG", serial="EMS6T00258087"
+            ),
             registers={VCP_D9: (0x0101, 0x070A), VCP_POWER: (0x0230, 0x0231)},
             capabilities="(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))",
         )
@@ -1891,7 +1895,9 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
     @classmethod
     def pd2700u(cls, device_name: str, primary: bool = False) -> FakeMonitor:
         return FakeMonitor(
-            MonitorInfo(device_name=device_name, primary=primary, description=cls.GENERIC),
+            MonitorInfo(
+                device_name, primary, cls.GENERIC, product="BNQ802E", name="BenQ PD2700U", serial="ETSCL07402SL0"
+            ),
             registers={VCP_D9: (0, 0)},
             capabilities="(prot(monitor)type(LCD)model(PD2700U)vcp(10 12))",
         )
@@ -1910,23 +1916,28 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
         self.build([self.pd2700u(self.DISPLAY2, primary=True), self.rd280ug(self.DISPLAY1)])
         body = self.client.get("/moonhalo/brightness/50?transition=0").get_json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["state"]["monitor"], f"RD280UG on {self.DISPLAY1}")
+        self.assertEqual(body["state"]["monitor"], f"BenQ RD280UG on {self.DISPLAY1}")
         self.assertEqual(body["monitor"]["link"], "ok")
         self.assertEqual(
             self.port.monitor(self.DISPLAY1).writes,
             [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, pack_d9(1, 5))],  # colour step 1 read from its D9
         )
         self.assertEqual(self.port.monitor(self.DISPLAY2).writes, [])
+        # Detection made no DDC/CI call: the command's own D9 reads on the
+        # RD280UG are the only reads, and no capabilities string was read.
+        self.assertTrue(self.port.reads)
+        self.assertEqual(set(self.port.reads), {(self.DISPLAY1, VCP_D9)})
+        self.assertEqual(self.port.capabilities_reads, [])
         status = self.client.get("/moonhalo/status").get_json()
-        self.assertEqual(status["state"]["monitor"], f"RD280UG on {self.DISPLAY1}")
+        self.assertEqual(status["state"]["monitor"], f"BenQ RD280UG on {self.DISPLAY1}")
 
-    def test_no_rd280ug_gives_a_500_naming_the_models_and_status_agrees(self):
+    def test_no_rd280ug_gives_a_500_saying_not_attached_and_status_agrees(self):
         self.build([self.pd2700u(self.DISPLAY2, primary=True)])
         response = self.client.get("/moonhalo/on?transition=0")
         self.assertEqual(response.status_code, 500)
         body = response.get_json()
         self.assertFalse(body["ok"])
-        expected = f"no monitor with model RD280UG among: PD2700U ({self.DISPLAY2})"
+        expected = self.NOT_ATTACHED + f"BenQ PD2700U BNQ802E ({self.DISPLAY2})"
         self.assertEqual(body["error"], expected)
         self.assertEqual(body["monitor"]["link"], "failed")
         self.assertEqual(body["monitor"]["error"], expected)
@@ -1943,17 +1954,36 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
         del self.port.fake_monitors[1]
         response = self.client.get("/moonhalo/brightness/60?transition=0")
         self.assertEqual(response.status_code, 500)
-        self.assertIn("no monitor with model RD280UG", response.get_json()["error"])
+        self.assertEqual(response.get_json()["error"], self.NOT_ATTACHED + f"BenQ PD2700U BNQ802E ({self.DISPLAY2})")
         # And plugged into another port.
         self.port.fake_monitors.append(self.rd280ug(self.DISPLAY2.replace("2", "3")))
         body = self.client.get("/moonhalo/brightness/60?transition=0").get_json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["state"]["monitor"], "RD280UG on " + self.DISPLAY2.replace("2", "3"))
+        self.assertEqual(body["state"]["monitor"], "BenQ RD280UG on " + self.DISPLAY2.replace("2", "3"))
         self.assertEqual(body["monitor"]["link"], "ok")
+
+    def test_a_stuck_link_on_the_identified_monitor_names_it_in_the_monitor_link(self):
+        # The 2026-09-16 State B: the RD280UG is attached, Windows has
+        # its EDID, and every DDC/CI call fails with 0xC0262582.
+        stuck = self.rd280ug(self.DISPLAY1)
+        stuck.write_error = -1071241854
+        self.build([self.pd2700u(self.DISPLAY2, primary=True), stuck])
+        response = self.client.get("/moonhalo/on?transition=0")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        expected = (
+            f"BenQ RD280UG on {self.DISPLAY1} identified by EDID; DDC/CI not answering: "
+            "SetVCPFeature failed for VCP 0xD7 (Win32 error -1071241854 = 0xC0262582)"
+        )
+        self.assertEqual(body["error"], expected)
+        self.assertEqual(body["monitor"]["link"], "failed")
+        self.assertEqual(body["monitor"]["error"], expected)
+        status = self.client.get("/moonhalo/status").get_json()
+        self.assertEqual(status["state"]["monitor"], f"BenQ RD280UG on {self.DISPLAY1}")
+        self.assertEqual(status["monitor"]["error"], expected)
 
     def test_selector_skips_detection_and_names_the_description(self):
         first, second = self.pd2700u(self.DISPLAY2, primary=True), self.rd280ug(self.DISPLAY1)
-        first.fail_capabilities = second.fail_capabilities = 99  # detection would find nothing
         self.build([first, second], monitor_selector="DISPLAY1")
         body = self.client.get("/moonhalo/brightness/50?transition=0").get_json()
         self.assertTrue(body["ok"])

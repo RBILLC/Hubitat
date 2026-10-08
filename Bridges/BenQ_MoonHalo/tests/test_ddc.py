@@ -102,8 +102,8 @@ class TestFakeDdcPortCapabilities(unittest.TestCase):
         self.assertEqual(port.read_capabilities(), "(prot(monitor)model(RD280UG))")
 
     def test_default_capabilities_name_the_rd280ug(self):
-        # So a bare FakeDdcPort() is detected by model (issue #40) like the
-        # real monitor is.
+        # The RD280UG's string, for the `capabilities` command; detection
+        # itself goes by the EDID identity (issue #44).
         port = FakeDdcPort(retry_delay=0.0)
         self.assertIn("model(RD280UG)", port.read_capabilities())
 

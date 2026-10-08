@@ -286,10 +286,11 @@ class TestMoonHaloModelPower(unittest.TestCase):
             {"power", "level", "brightnessStep", "colorTemperature", "colorTempStep", "monitor"},
         )
 
-    def test_monitor_names_the_detected_model_and_device(self):
-        # Issue #40: the port's detection label, not the description.
+    def test_monitor_names_the_detected_monitor_and_device(self):
+        # Issues #40, #44: the port's detection label (the EDID name), not
+        # the description.
         state = self.model.status()
-        self.assertEqual(state["monitor"], "RD280UG on DRYRUN1")
+        self.assertEqual(state["monitor"], "BenQ RD280UG on DRYRUN1")
 
     def test_monitor_unknown_when_no_monitors(self):
         class NoMonitorsPort(FakeDdcPort):
@@ -579,7 +580,7 @@ class TestMonitorLink(unittest.TestCase):
     the first call, `failed` with the error text and time after any
     failure, `ok` after any success."""
 
-    OUTAGE_ERROR = "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854)"
+    OUTAGE_ERROR = "SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)"
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

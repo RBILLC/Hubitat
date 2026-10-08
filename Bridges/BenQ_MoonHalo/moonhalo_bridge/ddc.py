@@ -1,45 +1,27 @@
 """DDC/CI port abstraction: list monitors, pick the MoonHalo monitor, read
 and write VCP registers.
 
-This module defines the `DdcPort` interface plus two implementations:
-`WindowsDdcPort`, which drives the real monitor through the Windows Monitor
-Configuration API (dxva2.dll / user32.dll via ctypes), and `FakeDdcPort`,
-an in-memory stand-in used by tests and `--dry-run`.
+`DdcPort` is the interface; `WindowsDdcPort` drives the real monitor
+through the Windows Monitor Configuration API (dxva2.dll / user32.dll via
+ctypes) and `FakeDdcPort` is the in-memory stand-in for tests and
+`--dry-run`.
 
-Which monitor a read or write goes to is decided here, once per display
-set (issue #40). With `monitor_selector` set, the first monitor whose
-device name or description contains it (case-insensitive) is the target,
-as in 0.0.7. With no selector the target is *detected* by identity: each
-attached monitor's DDC/CI capabilities string is read and the one whose
-`model(...)` contains `monitor_model` (default "RD280UG") wins. If the
-capabilities read fails on every monitor, the D9 probe decides instead:
-the monitor whose D9 read (the MoonHalo's own register) returns a non-zero
-maximum. Two model matches are broken the same way; still ambiguous, the
-first is taken with one warning. A model match is sanity-checked with one
-D9 read, warning if it fails or its maximum is zero; the match stands.
+Monitor detection (issues #40, #44) happens here, once per display set.
+With `monitor_selector` set, the first monitor whose device name or
+description contains it is the target. Otherwise the target is the
+attached monitor whose EDID identity has product `monitor_product`
+(default `BNQ80BB`, the RD280UG). The identity is the registry's EDID
+cache, located through `EnumDisplayDevices`, so detection makes no
+DDC/CI call: the first read or write is the first one. One match is rule
+`edid`; several take the first with one warning (`first-of-ambiguous`);
+none is a miss, raised as `DdcError` naming what is attached and tried
+again on every call. A DDC/CI failure on the identified monitor is
+re-raised with its label and `identified by EDID; DDC/CI not answering:`
+in front, so a stuck link never reads as an absent monitor. The README
+has the details.
 
-Why: on 2026-09-16 a second monitor (PD2700U) became the Windows primary
-display and carried the same "Generic PnP Monitor" description as the
-RD280UG. Selecting the primary sent every write to the wrong monitor,
-which acknowledged them, so every link read healthy while the halo did
-nothing. A description is no handle and a device name (`\\\\.\\DISPLAY1`)
-names a port that a cable move can renumber; the capabilities string is
-the only thing that says what the monitor is.
-
-The result is cached against the set of attached device names: the ports
-enumerate on every call anyway, so a cable swap while running is noticed
-on the next command and detection runs again. A miss (no monitor found,
-or a selector that matches nothing) is kept for `MISS_RETRY_SECONDS`
-while the display set stays the same, then tried again: on 2026-09-16
-each miss cost 2.8 s (the PD2700U's capabilities read), and detecting on
-every call made a Ramp's writes and the command queued behind them take
-longer than the Driver's 5 s request timeout, so the Bridge link flapped
-offline. A cable change still detects at once. Nothing is chosen
-silently: a miss raises `DdcError` with the models seen, which is how the
-Monitor link reports it.
-
-Windows-only bindings are created lazily, inside `WindowsDdcPort.__init__`,
-so this module can be imported on any OS.
+Windows-only bindings load lazily in `WindowsDdcPort.__init__`, so this
+module imports on any OS.
 """
 from __future__ import annotations
 
@@ -49,7 +31,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Optional, TypeVar, Union
 
-from .capabilities import parse_segment
+from .edid import EdidIdentity, device_parameters_key, parse_edid
 
 T = TypeVar("T")
 
@@ -59,20 +41,20 @@ _logger = logging.getLogger(__name__)
 DEFAULT_READ_RETRIES = 3
 #: Pause between read attempts, in seconds.
 DEFAULT_READ_RETRY_DELAY = 0.05
-#: The `model(...)` the Bridge looks for when no selector is set (issue #40).
-DEFAULT_MONITOR_MODEL = "RD280UG"
-#: The register the D9 probe reads: the MoonHalo's own, which only the
-#: RD280UG answers with a non-zero maximum (0x070A; the PD2700U gives 0).
-PROBE_VCP = 0xD9
-#: How long a miss stands for an unchanged display set before detection
-#: is tried again (see the module docstring).
-MISS_RETRY_SECONDS = 30.0
+#: The EDID product (manufacturer letters plus product code) the Bridge
+#: looks for when no selector is set: the RD280UG's.
+DEFAULT_MONITOR_PRODUCT = "BNQ80BB"
+#: EDID names of known products, so a miss can name the monitor before
+#: it has ever been seen.
+KNOWN_PRODUCT_NAMES = {DEFAULT_MONITOR_PRODUCT: "BenQ RD280UG"}
 #: What `target_label` (and so `state.monitor`) reads before any
 #: resolution and after a miss.
 UNKNOWN_LABEL = "unknown"
-#: What a bare `FakeDdcPort()` advertises, so it is detected by model like
-#: the real monitor; `cli.DRY_RUN_CAPABILITIES` is the RD280UG's full string.
+#: What a bare `FakeDdcPort()` advertises; `cli.DRY_RUN_CAPABILITIES` is
+#: the RD280UG's full string.
 DEFAULT_FAKE_CAPABILITIES = "(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))"
+#: `EnumDisplayDevices` flag: return the monitor's device interface path.
+EDD_GET_DEVICE_INTERFACE_NAME = 0x00000001
 
 
 @dataclass(frozen=True)
@@ -82,26 +64,64 @@ class MonitorInfo:
     device_name: the GDI device name of the parent display (e.g. ``\\\\.\\DISPLAY1``).
     primary: True if the parent display is the Windows primary monitor.
     description: the physical monitor's DDC/CI description string.
+    product, name, serial: its EDID identity (``BNQ80BB``, ``BenQ RD280UG``,
+        ``EMS6T00258087``); all None when Windows has no EDID for it, name
+        or serial None when the EDID lacks that descriptor.
     """
 
     device_name: str
     primary: bool
     description: str
+    product: Optional[str] = None
+    name: Optional[str] = None
+    serial: Optional[str] = None
+
+    def describe(self) -> str:
+        """`BenQ RD280UG BNQ80BB (\\\\.\\DISPLAY1)`; `BNQ80BB (...)` with no
+        name; `no EDID (...)` with no identity."""
+        if self.product is None:
+            what = "no EDID"
+        elif self.name is None:
+            what = self.product
+        else:
+            what = f"{self.name} {self.product}"
+        return f"{what} ({self.device_name})"
+
+
+#: The monitor a bare `FakeDdcPort()` and `--dry-run` have: the RD280UG's
+#: product and name with a made-up serial, so it is detected by `edid`
+#: like the real monitor.
+DEFAULT_FAKE_MONITOR = MonitorInfo(
+    device_name="DRYRUN1",
+    primary=True,
+    description="Generic PnP Monitor",
+    product=DEFAULT_MONITOR_PRODUCT,
+    name=KNOWN_PRODUCT_NAMES[DEFAULT_MONITOR_PRODUCT],
+    serial="FAKE00000000",
+)
 
 
 class DdcError(Exception):
     """A DDC/CI operation failed.
 
     `win32_error` carries the value of `GetLastError()` when the failure
-    came from a Win32 call, or `None` for errors raised without one (for
-    example an unknown VCP code on `FakeDdcPort`).
+    came from a Win32 call, printed as decimal and hex (`-1071241854 =
+    0xC0262582`), or `None` for errors raised without one (for example an
+    unknown VCP code on `FakeDdcPort`).
     """
 
     def __init__(self, message: str, win32_error: Optional[int] = None):
         self.win32_error = win32_error
         if win32_error is not None:
-            message = f"{message} (Win32 error {win32_error})"
+            message = f"{message} (Win32 error {win32_error} = 0x{win32_error & 0xFFFFFFFF:08X})"
         super().__init__(message)
+
+    def on_identified(self, label: str) -> "DdcError":
+        """This failure as reported when it happened on a monitor that
+        detection identified by EDID."""
+        error = DdcError(f"{label} identified by EDID; DDC/CI not answering: {self}")
+        error.win32_error = self.win32_error
+        return error
 
 
 @dataclass(frozen=True)
@@ -109,17 +129,16 @@ class Detection:
     """The outcome of picking the target monitor (see the module docstring).
 
     device_name: the chosen monitor's device name; None when none was chosen.
-    label: what `state.monitor` reports: `"<model> on <device name>"` for a
-        detected monitor, `"<description> on <device name>"` for a selector
-        match, `UNKNOWN_LABEL` when none was chosen.
-    rule: how it was chosen: "selector", "model", "d9-probe", "tie-break",
-        "first-of-ambiguous", or "none".
+    label: what `state.monitor` reports: `"<EDID name> on <device name>"`
+        for a detected monitor (its product when the EDID has no name),
+        `"<description> on <device name>"` for a selector match,
+        `UNKNOWN_LABEL` when none was chosen.
+    rule: how it was chosen: "selector", "edid", "first-of-ambiguous", or "none".
     seen: the attached device names at the time, sorted -- the display set
         a later call compares against to decide whether to resolve again.
     error: why nothing was chosen; None when something was.
-    candidates: every monitor detection looked at, as `"<model> (<device
-        name>)"` (`no model` or `unreadable` in place of a model); empty
-        for a selector match.
+    candidates: every monitor detection looked at, as `MonitorInfo.describe`
+        gives them; empty for a selector match.
     """
 
     device_name: Optional[str]
@@ -143,8 +162,7 @@ def _read_with_retries(
     between attempts, and re-raise the last `DdcError` if every attempt
     fails. Shared by every retried read -- VCP reads and capabilities
     reads alike -- so the retry behaviour can be exercised through
-    `FakeDdcPort` in tests. Generic in the return type so it serves both
-    `read_vcp` (`tuple[int, int]`) and `read_capabilities` (`str`).
+    `FakeDdcPort` in tests.
     """
     last_error: Optional[DdcError] = None
     for attempt in range(retries):
@@ -156,34 +174,6 @@ def _read_with_retries(
                 time.sleep(delay)
     assert last_error is not None
     raise last_error
-
-
-@dataclass
-class _Candidate:
-    """One attached monitor as detection sees it."""
-
-    info: MonitorInfo
-    #: The `model(...)` from its capabilities; None when the string has no
-    #: model segment (or cannot be parsed).
-    model: Optional[str] = None
-    #: False when every capabilities attempt failed.
-    readable: bool = True
-    #: D9's maximum from the probe; None when unread or the read failed.
-    d9_maximum: Optional[int] = None
-
-    @property
-    def device_name(self) -> str:
-        return self.info.device_name
-
-    def describe(self) -> str:
-        """`RD280UG (\\\\.\\DISPLAY1)`, `no model (...)` or `unreadable (...)`."""
-        if not self.readable:
-            what = "unreadable"
-        elif self.model is None:
-            what = "no model"
-        else:
-            what = self.model
-        return f"{what} ({self.device_name})"
 
 
 class DdcPort(ABC):
@@ -198,28 +188,28 @@ class DdcPort(ABC):
     def __init__(
         self,
         monitor_selector: Optional[str] = None,
-        monitor_model: str = DEFAULT_MONITOR_MODEL,
+        monitor_product: str = DEFAULT_MONITOR_PRODUCT,
         retries: int = DEFAULT_READ_RETRIES,
         retry_delay: float = DEFAULT_READ_RETRY_DELAY,
         logger: Optional[logging.Logger] = None,
     ):
         self.monitor_selector = monitor_selector
-        self.monitor_model = monitor_model
+        self.monitor_product = monitor_product
         self._retries = retries
         self._retry_delay = retry_delay
         #: Where detection lines go: `serve` passes the Bridge's file
         #: logger so they land in `bridge.log`; the CLI a stderr logger.
         self._logger = logger if logger is not None else _logger
         self._detection: Optional[Detection] = None
-        #: `time.monotonic` at the last resolution; tests replace `_clock`.
-        self._clock: Callable[[], float] = time.monotonic
-        self._resolved_at: float = 0.0
+        #: The reason of the last miss logged; a repeat is not logged again.
+        self._last_miss: Optional[str] = None
 
     # -- interface -------------------------------------------------------
 
     @abstractmethod
     def list_monitors(self) -> list[MonitorInfo]:
-        """Return every physical monitor attached to the system."""
+        """Return every physical monitor attached to the system, with its
+        EDID identity."""
 
     @abstractmethod
     def _read_vcp_on(self, device_name: str, code: int) -> tuple[int, int]:
@@ -242,7 +232,7 @@ class DdcPort(ABC):
 
     @property
     def target_label(self) -> str:
-        """`"<model> on <device name>"` for the current target, or
+        """`"<name> on <device name>"` for the current target, or
         `UNKNOWN_LABEL` before the first resolution or after a miss. What
         the model reports as `state.monitor`."""
         return self._detection.label if self._detection is not None else UNKNOWN_LABEL
@@ -250,20 +240,26 @@ class DdcPort(ABC):
     def resolve_target(self) -> Detection:
         """Resolve the target monitor for the attached display set, reusing
         the last result while the set of device names is unchanged and it
-        found something. Never raises for a miss: the returned Detection
-        says so (and the port calls raise from it)."""
+        found something; a miss is tried again on every call. Never raises
+        for a miss: the returned Detection says so (and the port calls
+        raise from it)."""
         monitors = self.list_monitors()
         seen = tuple(sorted({monitor.device_name for monitor in monitors}))
         cached = self._detection
-        if cached is not None and cached.seen == seen:
-            if cached.found or self._clock() - self._resolved_at < MISS_RETRY_SECONDS:
-                return cached
+        if cached is not None and cached.found and cached.seen == seen:
+            return cached
         if not monitors:
             detection = Detection(None, UNKNOWN_LABEL, "none", seen, "No display monitors found")
         elif self.monitor_selector:
             detection = self._select(monitors, seen)
         else:
             detection = self._detect(monitors, seen)
+        self._log(detection)
+        self._detection = detection
+        return detection
+
+    def _log(self, detection: Detection) -> None:
+        """One line per detection; a miss only when its reason is new."""
         if detection.rule == "selector":
             self._logger.info(
                 "monitor %s by selector %r", detection.label, self.monitor_selector
@@ -275,19 +271,25 @@ class DdcPort(ABC):
                 detection.rule,
                 ", ".join(detection.candidates),
             )
-        else:
+        elif detection.error != self._last_miss:
             self._logger.warning("monitor not found: %s", detection.error)
-        self._detection = detection
-        self._resolved_at = self._clock()
-        return detection
+        self._last_miss = detection.error
 
-    def _target_device(self) -> str:
+    def _on_target(self, action: Callable[[str], T]) -> T:
+        """Run `action(device_name)` on the target monitor. A miss raises
+        its reason; a `DdcError` on a monitor identified by EDID is
+        re-raised with the identity in front."""
         detection = self.resolve_target()
         if not detection.found:
             assert detection.error is not None
             raise DdcError(detection.error)
         assert detection.device_name is not None
-        return detection.device_name
+        try:
+            return action(detection.device_name)
+        except DdcError as error:
+            if detection.rule == "selector":
+                raise
+            raise error.on_identified(detection.label) from error
 
     def _select(self, monitors: list[MonitorInfo], seen: tuple[str, ...]) -> Detection:
         """The manual override: first monitor whose device name or
@@ -311,164 +313,63 @@ class DdcPort(ABC):
         )
 
     def _detect(self, monitors: list[MonitorInfo], seen: tuple[str, ...]) -> Detection:
-        """Detection by identity: model first, the D9 probe as fallback
-        and tie-breaker (see the module docstring)."""
-        candidates = self._read_models(monitors)
-        needle = self.monitor_model.lower()
-        matches = [c for c in candidates if c.model is not None and needle in c.model.lower()]
-
-        if not any(c.readable for c in candidates):
-            answering = self._probe(candidates)
-            if not answering:
-                names = ", ".join(c.device_name for c in candidates)
-                return Detection(
-                    None,
-                    UNKNOWN_LABEL,
-                    "none",
-                    seen,
-                    f"no monitor with model {self.monitor_model}: capabilities unreadable on "
-                    f"{names} and the D9 probe answered on none",
-                    candidates=tuple(c.describe() for c in candidates),
-                )
-            return self._choose(
-                answering,
-                "d9-probe",
-                candidates,
-                seen,
-                "answer the D9 probe (capabilities unreadable on every monitor)",
-            )
-
-        if len(matches) == 1:
-            chosen = matches[0]
-            self._sanity_check(chosen)
-            return self._choose([chosen], "model", candidates, seen, "")
-
-        if len(matches) > 1:
-            answering = self._probe(matches)
-            if answering:
-                how = f"match model {self.monitor_model} and answer the D9 probe"
-            else:
-                how = f"match model {self.monitor_model} and none answers the D9 probe"
-            return self._choose(answering or matches, "tie-break", candidates, seen, how)
-
+        """Detection by EDID identity: the monitors whose product is
+        `monitor_product`, compared case-insensitively."""
+        candidates: list[MonitorInfo] = []
+        for monitor in monitors:
+            if all(c.device_name != monitor.device_name for c in candidates):
+                candidates.append(monitor)
         described = tuple(c.describe() for c in candidates)
+        wanted = self.monitor_product.upper()
+        matches = [c for c in candidates if c.product is not None and c.product.upper() == wanted]
+        if not matches:
+            return Detection(
+                None,
+                UNKNOWN_LABEL,
+                "none",
+                seen,
+                f"{self._wanted_label()} is not attached: asleep, off or unplugged; "
+                f"attached: {', '.join(described)}",
+                candidates=described,
+            )
+        rule = "edid"
+        if len(matches) > 1:
+            rule = "first-of-ambiguous"
+            self._logger.warning(
+                "%d monitors have product %s, taking the first: %s",
+                len(matches),
+                self.monitor_product,
+                ", ".join(c.describe() for c in matches),
+            )
+        winner = matches[0]
         return Detection(
-            None,
-            UNKNOWN_LABEL,
-            "none",
+            winner.device_name,
+            f"{winner.name or winner.product} on {winner.device_name}",
+            rule,
             seen,
-            f"no monitor with model {self.monitor_model} among: {', '.join(described)}",
             candidates=described,
         )
 
-    def _read_models(self, monitors: list[MonitorInfo]) -> list[_Candidate]:
-        """One candidate per device name, with its model read from its
-        capabilities (three attempts, like every read)."""
-        candidates: list[_Candidate] = []
-        for monitor in monitors:
-            if any(c.device_name == monitor.device_name for c in candidates):
-                continue
-            candidate = _Candidate(monitor)
-            try:
-                raw = _read_with_retries(
-                    lambda: self._read_capabilities_on(monitor.device_name),
-                    self._retries,
-                    self._retry_delay,
-                )
-            except DdcError:
-                candidate.readable = False
-            else:
-                try:
-                    candidate.model = parse_segment(raw, "model")
-                except ValueError:
-                    candidate.model = None
-            candidates.append(candidate)
-        return candidates
-
-    def _read_d9_maximum(self, candidate: _Candidate) -> Optional[DdcError]:
-        """One retried D9 read on that candidate, recording its maximum in
-        `d9_maximum`; returns the error when every attempt failed (the
-        maximum then stays None), else None."""
-        try:
-            _, maximum = _read_with_retries(
-                lambda: self._read_vcp_on(candidate.device_name, PROBE_VCP),
-                self._retries,
-                self._retry_delay,
-            )
-        except DdcError as error:
-            return error
-        candidate.d9_maximum = maximum
-        return None
-
-    def _probe(self, candidates: list[_Candidate]) -> list[_Candidate]:
-        """The D9 probe: those candidates whose D9 read returns a non-zero
-        maximum. A failed read counts as no."""
-        answering: list[_Candidate] = []
-        for candidate in candidates:
-            if self._read_d9_maximum(candidate) is None and candidate.d9_maximum:
-                answering.append(candidate)
-        return answering
-
-    def _sanity_check(self, chosen: _Candidate) -> None:
-        """After a model match, one D9 read: warn if it fails or its
-        maximum is zero (model matched, halo register did not answer)."""
-        error = self._read_d9_maximum(chosen)
-        if error is not None:
-            self._logger.warning(
-                "model %s matched on %s but its D9 read failed: %s",
-                chosen.model,
-                chosen.device_name,
-                error,
-            )
-            return
-        if chosen.d9_maximum == 0:
-            self._logger.warning(
-                "model %s matched on %s but its D9 maximum is zero",
-                chosen.model,
-                chosen.device_name,
-            )
-
-    def _choose(
-        self,
-        chosen: list[_Candidate],
-        rule: str,
-        candidates: list[_Candidate],
-        seen: tuple[str, ...],
-        how: str,
-    ) -> Detection:
-        """Take the first of `chosen`, warning when there was more than
-        one; `how` says what the several have in common, for that warning."""
-        if len(chosen) > 1:
-            rule = "first-of-ambiguous"
-            self._logger.warning(
-                "%d monitors %s, taking the first: %s",
-                len(chosen),
-                how,
-                ", ".join(c.describe() for c in chosen),
-            )
-        winner = chosen[0]
-        model = winner.model if winner.model is not None else self.monitor_model
-        return Detection(
-            winner.device_name,
-            f"{model} on {winner.device_name}",
-            rule,
-            seen,
-            candidates=tuple(c.describe() for c in candidates),
-        )
+    def _wanted_label(self) -> str:
+        """`BenQ RD280UG (BNQ80BB)` for a known product; the bare product
+        otherwise."""
+        name = KNOWN_PRODUCT_NAMES.get(self.monitor_product.upper())
+        return f"{name} ({self.monitor_product})" if name else self.monitor_product
 
     # -- reads and writes ------------------------------------------------
 
     def read_vcp(self, code: int) -> tuple[int, int]:
         """Return `(current, maximum)` for the given VCP feature code on
         the target monitor, retrying a transient failure."""
-        device = self._target_device()
-        return _read_with_retries(
-            lambda: self._read_vcp_on(device, code), self._retries, self._retry_delay
+        return self._on_target(
+            lambda device: _read_with_retries(
+                lambda: self._read_vcp_on(device, code), self._retries, self._retry_delay
+            )
         )
 
     def write_vcp(self, code: int, value: int) -> None:
         """Write `value` to the given VCP feature code on the target monitor."""
-        self._write_vcp_on(self._target_device(), code, value)
+        self._on_target(lambda device: self._write_vcp_on(device, code, value))
 
     def read_capabilities(self) -> str:
         """Return the target monitor's raw DDC/CI capabilities string,
@@ -481,9 +382,10 @@ class DdcPort(ABC):
         50ms later succeeding. So this goes through the same three-attempt
         retry as `read_vcp`.
         """
-        device = self._target_device()
-        return _read_with_retries(
-            lambda: self._read_capabilities_on(device), self._retries, self._retry_delay
+        return self._on_target(
+            lambda device: _read_with_retries(
+                lambda: self._read_capabilities_on(device), self._retries, self._retry_delay
+            )
         )
 
 
@@ -493,17 +395,20 @@ class WindowsDdcPort(DdcPort):
     Opens a physical monitor handle for each operation and destroys it
     with `DestroyPhysicalMonitors` afterwards. Which display the handle is
     opened on is the target resolved by `DdcPort` (selector or detection).
+    The EDID identity of each monitor is read from the registry cache
+    under its device interface path (`EnumDisplayDevices` with
+    `EDD_GET_DEVICE_INTERFACE_NAME` on the display's device name).
     """
 
     def __init__(
         self,
         monitor_selector: Optional[str] = None,
-        monitor_model: str = DEFAULT_MONITOR_MODEL,
+        monitor_product: str = DEFAULT_MONITOR_PRODUCT,
         retries: int = DEFAULT_READ_RETRIES,
         retry_delay: float = DEFAULT_READ_RETRY_DELAY,
         logger: Optional[logging.Logger] = None,
     ):
-        super().__init__(monitor_selector, monitor_model, retries, retry_delay, logger)
+        super().__init__(monitor_selector, monitor_product, retries, retry_delay, logger)
         self._load_bindings()
 
     def _load_bindings(self) -> None:
@@ -532,8 +437,19 @@ class WindowsDdcPort(DdcPort):
                 ("szDevice", wintypes.WCHAR * 32),
             ]
 
+        class DISPLAY_DEVICEW(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("DeviceName", wintypes.WCHAR * 32),
+                ("DeviceString", wintypes.WCHAR * 128),
+                ("StateFlags", wintypes.DWORD),
+                ("DeviceID", wintypes.WCHAR * 128),
+                ("DeviceKey", wintypes.WCHAR * 128),
+            ]
+
         self._PHYSICAL_MONITOR = PHYSICAL_MONITOR
         self._MONITORINFOEXW = MONITORINFOEXW
+        self._DISPLAY_DEVICEW = DISPLAY_DEVICEW
         self._MONITORENUMPROC = ctypes.WINFUNCTYPE(
             wintypes.BOOL,
             wintypes.HMONITOR,
@@ -549,6 +465,13 @@ class WindowsDdcPort(DdcPort):
             wintypes.LPARAM,
         ]
         self._user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFOEXW)]
+        self._user32.EnumDisplayDevicesW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            ctypes.POINTER(DISPLAY_DEVICEW),
+            wintypes.DWORD,
+        ]
+        self._user32.EnumDisplayDevicesW.restype = wintypes.BOOL
         self._dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR.argtypes = [
             wintypes.HMONITOR,
             ctypes.POINTER(wintypes.DWORD),
@@ -620,17 +543,62 @@ class WindowsDdcPort(DdcPort):
             device_name, primary = self._monitor_info(hmon)
             arr = self._physical_monitors(hmon)
             try:
-                for pm in arr:
+                for index, pm in enumerate(arr):
+                    identity = self._edid_identity(device_name, index)
                     result.append(
                         MonitorInfo(
                             device_name=device_name,
                             primary=primary,
                             description=pm.szPhysicalMonitorDescription,
+                            product=identity.product if identity else None,
+                            name=identity.name if identity else None,
+                            serial=identity.serial if identity else None,
                         )
                     )
             finally:
                 self._destroy(arr)
         return result
+
+    # -- EDID identity ----------------------------------------------------
+
+    def _interface_path(self, device_name: str, index: int) -> Optional[str]:
+        """The device interface path of the `index`th monitor of that
+        display (`\\\\?\\DISPLAY#BNQ80BB#...#{guid}`), or None when Windows
+        lists none."""
+        ctypes = self._ctypes
+        device = self._DISPLAY_DEVICEW()
+        device.cb = ctypes.sizeof(self._DISPLAY_DEVICEW)
+        ok = self._user32.EnumDisplayDevicesW(
+            device_name, index, ctypes.byref(device), EDD_GET_DEVICE_INTERFACE_NAME
+        )
+        if not ok or not device.DeviceID:
+            return None
+        return device.DeviceID
+
+    def _registry_edid(self, interface_path: str) -> Optional[bytes]:
+        """The cached EDID bytes under that monitor's `Device Parameters`
+        key, or None when the key or the value is missing."""
+        import winreg
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, device_parameters_key(interface_path)) as key:
+                value, kind = winreg.QueryValueEx(key, "EDID")
+        except (OSError, ValueError):
+            return None
+        return bytes(value) if kind == winreg.REG_BINARY else None
+
+    def _edid_identity(self, device_name: str, index: int) -> Optional[EdidIdentity]:
+        """The EDID identity of that monitor; None when Windows has no
+        EDID for it."""
+        path = self._interface_path(device_name, index)
+        data = self._registry_edid(path) if path is not None else None
+        if data is None:
+            return None
+        try:
+            return parse_edid(data)
+        except ValueError as error:
+            self._logger.debug("EDID of %s not parsed: %s", device_name, error)
+            return None
 
     def _open_physical_monitor(self, device_name: str):
         """Return the PHYSICAL_MONITOR array of the display named
@@ -721,6 +689,8 @@ class FakeMonitor:
     read of that code consumes one before falling through to `registers`,
     which is how tests exercise the retry path without hardware.
     `fail_capabilities` is the same counter for capabilities reads.
+    `write_error` is a Win32 error code every write fails with (None
+    writes normally), standing for a stuck DDC/CI link.
     `writes` records this monitor's `(code, value)` writes in order.
     """
 
@@ -729,6 +699,7 @@ class FakeMonitor:
     capabilities: str = DEFAULT_FAKE_CAPABILITIES
     fail_reads: dict[int, int] = field(default_factory=dict)
     fail_capabilities: int = 0
+    write_error: Optional[int] = None
     writes: list[tuple[int, int]] = field(default_factory=list)
 
     @property
@@ -741,11 +712,14 @@ class FakeDdcPort(DdcPort):
 
     `monitors` lists the attached monitors as `FakeMonitor`s, or as
     `MonitorInfo`s that all get a copy of `registers` and `capabilities`;
-    the default is one primary "Generic PnP Monitor" that answers as the
-    RD280UG. `fake_monitors` is that list, editable between calls to stand
-    for a cable swap. `writes` records every `write_vcp` call port-wide as
-    `(code, value)`, in the order made; `monitor(device_name).writes` has
-    the ones that reached each monitor.
+    the default is one primary "Generic PnP Monitor" with the RD280UG's
+    EDID identity that answers as the RD280UG. `fake_monitors` is that
+    list, editable between calls to stand for a cable swap. `writes`
+    records every `write_vcp` call port-wide as `(code, value)`, in the
+    order made; `monitor(device_name).writes` has the ones that reached
+    each monitor. `reads` records every VCP read attempt as `(device_name,
+    code)` and `capabilities_reads` every capabilities read attempt by
+    device name, so a test can show detection made none.
 
     `registers`, `capabilities`, `fail_reads` and `fail_capabilities` are
     those of the first listed monitor, which is what a one-monitor test
@@ -760,14 +734,12 @@ class FakeDdcPort(DdcPort):
         retry_delay: float = 0.0,
         capabilities: str = DEFAULT_FAKE_CAPABILITIES,
         monitor_selector: Optional[str] = None,
-        monitor_model: str = DEFAULT_MONITOR_MODEL,
+        monitor_product: str = DEFAULT_MONITOR_PRODUCT,
         logger: Optional[logging.Logger] = None,
     ):
-        super().__init__(monitor_selector, monitor_model, retries, retry_delay, logger)
+        super().__init__(monitor_selector, monitor_product, retries, retry_delay, logger)
         if monitors is None:
-            monitors = [
-                MonitorInfo(device_name="DRYRUN1", primary=True, description="Generic PnP Monitor"),
-            ]
+            monitors = [DEFAULT_FAKE_MONITOR]
         self.fake_monitors: list[FakeMonitor] = [
             entry
             if isinstance(entry, FakeMonitor)
@@ -775,6 +747,8 @@ class FakeDdcPort(DdcPort):
             for entry in monitors
         ]
         self.writes: list[tuple[int, int]] = []
+        self.reads: list[tuple[str, int]] = []
+        self.capabilities_reads: list[str] = []
 
     # -- the first monitor's state, for one-monitor tests ------------------
 
@@ -837,6 +811,7 @@ class FakeDdcPort(DdcPort):
         return self.monitors
 
     def _read_vcp_on(self, device_name: str, code: int) -> tuple[int, int]:
+        self.reads.append((device_name, code))
         monitor = self._attached(device_name)
         remaining = monitor.fail_reads.get(code, 0)
         if remaining > 0:
@@ -848,12 +823,15 @@ class FakeDdcPort(DdcPort):
 
     def _write_vcp_on(self, device_name: str, code: int, value: int) -> None:
         monitor = self._attached(device_name)
+        if monitor.write_error is not None:
+            raise DdcError(f"SetVCPFeature failed for VCP 0x{code:02X}", monitor.write_error)
         self.writes.append((code, value))
         monitor.writes.append((code, value))
         _, existing_max = monitor.registers.get(code, (value, value))
         monitor.registers[code] = (value, existing_max)
 
     def _read_capabilities_on(self, device_name: str) -> str:
+        self.capabilities_reads.append(device_name)
         monitor = self._attached(device_name)
         if monitor.fail_capabilities > 0:
             monitor.fail_capabilities -= 1

@@ -31,25 +31,31 @@ class ConfigTestCase(unittest.TestCase):
 
 
 class TestMonitorKeys(ConfigTestCase):
-    """Issue #40: `monitor_model` names what the Bridge detects when
-    `monitor_selector` is null."""
+    """Issues #40 and #44: `monitor_product` names the EDID identity the
+    Bridge detects when `monitor_selector` is null."""
 
     def test_documented_defaults(self):
         self.assertIsNone(DEFAULTS["monitor_selector"])
-        self.assertEqual(DEFAULTS["monitor_model"], "RD280UG")
+        self.assertEqual(DEFAULTS["monitor_product"], "BNQ80BB")
+        self.assertNotIn("monitor_model", DEFAULTS)  # retired in 0.0.10
         config = load_config(self.tmp_dir / "absent.json")
         self.assertIsNone(config.monitor_selector)
-        self.assertEqual(config.monitor_model, "RD280UG")
+        self.assertEqual(config.monitor_product, "BNQ80BB")
+        self.assertFalse(hasattr(config, "monitor_model"))
 
     def test_values_are_read(self):
-        config = load_config(self.write({"monitor_selector": "DISPLAY1", "monitor_model": "PD2700U"}))
+        config = load_config(self.write({"monitor_selector": "DISPLAY1", "monitor_product": "BNQ802E"}))
         self.assertEqual(config.monitor_selector, "DISPLAY1")
-        self.assertEqual(config.monitor_model, "PD2700U")
+        self.assertEqual(config.monitor_product, "BNQ802E")
 
-    def test_blank_selector_means_detect_and_blank_model_means_the_default(self):
-        config = load_config(self.write({"monitor_selector": "  ", "monitor_model": None}))
+    def test_blank_selector_means_detect_and_blank_product_means_the_default(self):
+        config = load_config(self.write({"monitor_selector": "  ", "monitor_product": None}))
         self.assertIsNone(config.monitor_selector)
-        self.assertEqual(config.monitor_model, "RD280UG")
+        self.assertEqual(config.monitor_product, "BNQ80BB")
+
+    def test_a_retired_monitor_model_key_is_ignored(self):
+        config = load_config(self.write({"monitor_model": "RD280UG"}))
+        self.assertEqual(config.monitor_product, "BNQ80BB")
 
 
 class TestAnnounceDefaults(ConfigTestCase):

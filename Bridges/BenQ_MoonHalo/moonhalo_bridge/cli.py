@@ -11,13 +11,20 @@ from pathlib import Path
 from typing import Optional, Sequence, TextIO
 
 from .capabilities import VcpEntry, parse_vcp_codes
-from .ddc import DEFAULT_MONITOR_MODEL, DdcError, DdcPort, FakeDdcPort, MonitorInfo, WindowsDdcPort
+from .ddc import (
+    DEFAULT_FAKE_MONITOR,
+    DEFAULT_MONITOR_PRODUCT,
+    DdcError,
+    DdcPort,
+    FakeDdcPort,
+    MonitorInfo,
+    WindowsDdcPort,
+)
 
 #: Hardware facts verified on the RD280UG on 2026-09-03, used to pre-load the
-#: `--dry-run` fake port.
-DRY_RUN_MONITORS = [
-    MonitorInfo(device_name="DRYRUN1", primary=True, description="Generic PnP Monitor"),
-]
+#: `--dry-run` fake port; the monitor carries the RD280UG's EDID identity,
+#: so `--dry-run` detects by `edid` like the real monitor.
+DRY_RUN_MONITORS = [DEFAULT_FAKE_MONITOR]
 DRY_RUN_REGISTERS = {0xD9: (0x0105, 0x070A), 0xD7: (0x0230, 0x0231)}
 
 #: The RD280UG's own DDC/CI capabilities string, read verbatim on
@@ -41,7 +48,7 @@ DRY_RUN_CAPABILITIES = (
 
 def make_dry_run_port(
     monitor_selector: Optional[str] = None,
-    monitor_model: str = DEFAULT_MONITOR_MODEL,
+    monitor_product: str = DEFAULT_MONITOR_PRODUCT,
     logger: Optional[logging.Logger] = None,
 ) -> FakeDdcPort:
     """A FakeDdcPort pre-loaded with the RD280UG's verified hardware facts."""
@@ -50,7 +57,7 @@ def make_dry_run_port(
         registers=dict(DRY_RUN_REGISTERS),
         capabilities=DRY_RUN_CAPABILITIES,
         monitor_selector=monitor_selector,
-        monitor_model=monitor_model,
+        monitor_product=monitor_product,
         logger=logger,
     )
 
@@ -106,14 +113,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SELECTOR",
         help=(
             "substring of a monitor's device name or description to act on, "
-            "instead of detecting the %s by its capabilities (monitors, read, "
-            "write, capabilities; serve takes config.json's monitor_selector)"
+            "instead of detecting the MoonHalo monitor by its EDID identity "
+            "(product %s; monitors, read, write, capabilities; serve takes "
+            "config.json's monitor_selector)"
         )
-        % DEFAULT_MONITOR_MODEL,
+        % DEFAULT_MONITOR_PRODUCT,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("monitors", help="list attached monitors and which one is the MoonHalo")
+    sub.add_parser(
+        "monitors", help="list attached monitors with their EDID identity and which one is the MoonHalo"
+    )
 
     sub.add_parser(
         "capabilities", help="read and parse the monitor's DDC/CI capabilities string"
@@ -138,7 +148,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _format_monitor(monitor: MonitorInfo) -> str:
-    return f"device={monitor.device_name} primary={monitor.primary} description={monitor.description!r}"
+    """One `monitors` line: device, primary, the EDID identity (`none`
+    for each field Windows has no value for), description."""
+    product = monitor.product if monitor.product is not None else "none"
+    name = repr(monitor.name) if monitor.name is not None else "none"
+    serial = repr(monitor.serial) if monitor.serial is not None else "none"
+    return (
+        f"device={monitor.device_name} primary={monitor.primary} product={product} "
+        f"name={name} serial={serial} description={monitor.description!r}"
+    )
 
 
 def _format_vcp(code: int, current: int, maximum: int) -> str:
@@ -156,9 +174,9 @@ def _format_vcp_entry(entry: VcpEntry) -> str:
 
 
 def _run_monitors(port: DdcPort, out: TextIO) -> int:
-    """List every attached monitor, then which one the port would act on
-    and by which rule (issue #40) -- with the real port this reads each
-    monitor's capabilities, which can take a few seconds."""
+    """List every attached monitor with its EDID identity, then which one
+    the port would act on and by which rule (issues #40, #44). No DDC/CI
+    call is made: the identity comes from Windows."""
     monitors = port.list_monitors()
     if not monitors:
         print("No monitors found.", file=out)
@@ -229,11 +247,11 @@ def _run_serve(dry_run: bool, config_path: Optional[Path], out: TextIO) -> int:
     config = load_config(config_path)
     ddc_logger = file_logger("moonhalo_bridge.ddc", config)
     if dry_run:
-        port: DdcPort = make_dry_run_port(config.monitor_selector, config.monitor_model, ddc_logger)
+        port: DdcPort = make_dry_run_port(config.monitor_selector, config.monitor_product, ddc_logger)
     else:
         port = WindowsDdcPort(
             monitor_selector=config.monitor_selector,
-            monitor_model=config.monitor_model,
+            monitor_product=config.monitor_product,
             logger=ddc_logger,
         )
     model = MoonHaloModel(port, config, logger=file_logger("moonhalo_bridge.model", config))

@@ -127,6 +127,18 @@ EDID name is the cross-reference, which `monitors` prints. Several RD280UGs on o
 [#45](https://github.com/RBILLC/Hubitat/issues/45) (needs-triage, later). Next: /implement #44, restart the
 task, hub check (first command after a wake inside the 5 s timeout); then #41; then 1.0.0.
 
+Status 2026-10-08 night: #44 implemented as Bridge 0.0.10 on main (`/implement`, Bridge-only, Driver
+untouched). New `moonhalo_bridge/edid.py` (EDID parser, tested against the RD280UG's and PD2700U's real
+registry bytes), `ddc.py` detection rewritten around `EnumDisplayDevices` + the registry EDID cache
+(rules `edid`, `selector`, `first-of-ambiguous`, `none`; no DDC/CI on the detection path; no miss cooldown;
+misses logged once per reason; `DdcError` prints the hex next to the decimal; failures on the identified
+monitor carry `identified by EDID; DDC/CI not answering:`), `monitor_product` replaces `monitor_model`,
+README and `config.example.json` updated. 362 tests pass; `py -m moonhalo_bridge monitors` on this PC
+answers in 88 ms with both displays' product, name and serial and `selected: BenQ RD280UG on \\.\DISPLAY1
+(by edid)`. Left to the user: restart the MoonHaloBridge task, the two hub checks on #44 (first command
+after a wake inside the 5 s timeout; standby reads not-attached and recovers with no restart), `/health`
+0.0.10 on the device page; then close #44, then #41, then 1.0.0.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping

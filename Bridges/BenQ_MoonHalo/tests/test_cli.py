@@ -17,6 +17,7 @@ from moonhalo_bridge.cli import (
     parse_value,
     parse_vcp_code,
 )
+from moonhalo_bridge.ddc import MonitorInfo
 
 
 class TestParseVcpCode(unittest.TestCase):
@@ -97,9 +98,25 @@ class TestDryRunMonitors(unittest.TestCase):
         exit_code = main(["--dry-run", "monitors"], out=out)
         self.assertEqual(exit_code, 0)
         output = out.getvalue()
-        self.assertIn("Generic PnP Monitor", output)
-        self.assertIn("primary=True", output)
-        self.assertIn("selected: RD280UG on DRYRUN1 (by model)", output)
+        self.assertIn(
+            "device=DRYRUN1 primary=True product=BNQ80BB name='BenQ RD280UG' serial='FAKE00000000' "
+            "description='Generic PnP Monitor'\n",
+            output,
+        )
+        self.assertIn("selected: BenQ RD280UG on DRYRUN1 (by edid)", output)
+
+    def test_a_display_with_no_edid_prints_none_for_each_identity_field(self):
+        port = make_dry_run_port()
+        port.fake_monitors[0].info = MonitorInfo("DRYRUN1", True, "Generic PnP Monitor")
+        out = io.StringIO()
+        with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
+            self.assertEqual(main(["--dry-run", "monitors"], out=out), 0)
+        self.assertIn(
+            "device=DRYRUN1 primary=True product=none name=none serial=none "
+            "description='Generic PnP Monitor'\n",
+            out.getvalue(),
+        )
+        self.assertIn("selected: none (BenQ RD280UG (BNQ80BB) is not attached", out.getvalue())
 
     def test_selector_option_names_the_rule(self):
         out = io.StringIO()
@@ -113,14 +130,18 @@ class TestDryRunMonitors(unittest.TestCase):
         self.assertIn("selected: none (no monitor matches selector 'nope'", out.getvalue())
         self.assertEqual(main(["--dry-run", "--monitor", "nope", "read", "D9"], out=io.StringIO()), 1)
 
-    def test_no_matching_model_is_reported(self):
+    def test_no_matching_product_is_reported_as_not_attached(self):
         port = make_dry_run_port()
-        port.capabilities = "(prot(monitor)type(LCD)model(PD2700U)vcp(10))"
+        port.fake_monitors[0].info = MonitorInfo(
+            "DRYRUN1", True, "Generic PnP Monitor", product="BNQ802E", name="BenQ PD2700U", serial="X"
+        )
         out = io.StringIO()
         with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
             self.assertEqual(main(["--dry-run", "monitors"], out=out), 0)
         self.assertIn(
-            "selected: none (no monitor with model RD280UG among: PD2700U (DRYRUN1))", out.getvalue()
+            "selected: none (BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; "
+            "attached: BenQ PD2700U BNQ802E (DRYRUN1))",
+            out.getvalue(),
         )
 
 
