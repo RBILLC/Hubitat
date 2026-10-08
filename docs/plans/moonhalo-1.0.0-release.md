@@ -201,6 +201,13 @@ the wake (`/extend` plus the button) relit the halo by firmware and the next off
 never reached the Bridge, cause on the hub side not established) and a confirmed off surviving sleep and wake;
 both covered by tests only, the closing comment says so. 1.0.0 stays PARKED; nothing is queued. #45, #26 later.
 
+Status 2026-10-08 evening, later (#48, from a preference audit the user asked for): Driver 0.0.16 implemented on
+main as 0e9fd96 (`warmKelvin`/`coolKelvin` dropped and removed on save, the Bridge owns the Kelvin range;
+every preference described, `(initial)` gone from the address titles; the Driver file and the root README
+American throughout, the Bridge README and CONTEXT.md unchanged). Five boxes ticked; left to the user: import
+0.0.16, save once, no Kelvin preferences on the device page, `setColorTemperature(3000)` still works; then close
+#48. The 1.0.0 bump stays PARKED; when it comes, the Driver changelog starts from 0.0.16. #45, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
