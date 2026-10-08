@@ -1889,7 +1889,6 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
                 device_name, primary, cls.GENERIC, product="BNQ80BB", name="BenQ RD280UG", serial="EMS6T00258087"
             ),
             registers={VCP_D9: (0x0101, 0x070A), VCP_POWER: (0x0230, 0x0231)},
-            capabilities="(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))",
         )
 
     @classmethod
@@ -1899,7 +1898,6 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
                 device_name, primary, cls.GENERIC, product="BNQ802E", name="BenQ PD2700U", serial="ETSCL07402SL0"
             ),
             registers={VCP_D9: (0, 0)},
-            capabilities="(prot(monitor)type(LCD)model(PD2700U)vcp(10 12))",
         )
 
     def build(self, monitors: list[FakeMonitor], **config_overrides):
@@ -1924,10 +1922,9 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
         )
         self.assertEqual(self.port.monitor(self.DISPLAY2).writes, [])
         # Detection made no DDC/CI call: the command's own D9 reads on the
-        # RD280UG are the only reads, and no capabilities string was read.
+        # RD280UG are the only reads.
         self.assertTrue(self.port.reads)
         self.assertEqual(set(self.port.reads), {(self.DISPLAY1, VCP_D9)})
-        self.assertEqual(self.port.capabilities_reads, [])
         status = self.client.get("/moonhalo/status").get_json()
         self.assertEqual(status["state"]["monitor"], f"BenQ RD280UG on {self.DISPLAY1}")
 

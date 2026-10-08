@@ -96,32 +96,6 @@ class TestReadRetryBehaviour(unittest.TestCase):
         self.assertEqual(port._retries, 3)
 
 
-class TestFakeDdcPortCapabilities(unittest.TestCase):
-    def test_read_capabilities_returns_the_configured_string(self):
-        port = FakeDdcPort(capabilities="(prot(monitor)model(RD280UG))", retry_delay=0.0)
-        self.assertEqual(port.read_capabilities(), "(prot(monitor)model(RD280UG))")
-
-    def test_default_capabilities_name_the_rd280ug(self):
-        # The RD280UG's string, for the `capabilities` command; detection
-        # itself goes by the EDID identity (issue #44).
-        port = FakeDdcPort(retry_delay=0.0)
-        self.assertIn("model(RD280UG)", port.read_capabilities())
-
-    def test_succeeds_after_transient_capabilities_failures(self):
-        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0, monitor_selector="DRYRUN1")
-        port.fail_capabilities = 2  # fails twice, succeeds on the 3rd attempt
-        self.assertEqual(port.read_capabilities(), "(vcp(D9))")
-        self.assertEqual(port.fail_capabilities, 0)
-
-    def test_raises_after_exhausting_all_three_capabilities_attempts(self):
-        port = FakeDdcPort(capabilities="(vcp(D9))", retry_delay=0.0, monitor_selector="DRYRUN1")
-        port.fail_capabilities = 5  # more failures than the retry budget
-        with self.assertRaises(DdcError):
-            port.read_capabilities()
-        # exactly 3 attempts should have been made (3 failures consumed)
-        self.assertEqual(port.fail_capabilities, 2)
-
-
 class TestDdcError(unittest.TestCase):
     def test_message_without_win32_error(self):
         error = DdcError("boom")
@@ -145,11 +119,6 @@ class TestWindowsDdcPortConstruction(unittest.TestCase):
         self.assertIsNone(port.monitor_selector)
         self.assertTrue(hasattr(port, "_dxva2"))
         self.assertTrue(hasattr(port, "_user32"))
-
-    def test_declares_capabilities_bindings(self):
-        port = WindowsDdcPort()
-        self.assertTrue(hasattr(port._dxva2.GetCapabilitiesStringLength, "argtypes"))
-        self.assertTrue(hasattr(port._dxva2.CapabilitiesRequestAndCapabilitiesReply, "argtypes"))
 
     def test_accepts_monitor_selector(self):
         port = WindowsDdcPort(monitor_selector="Generic")

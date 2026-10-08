@@ -150,12 +150,12 @@ Bridge it is talking to once the two pieces are upgraded separately:
 
 | Field | Meaning |
 |---|---|
-| `version` | The Bridge version, `"0.0.10"`, the same number `/health` has always reported. The Driver keeps it as the `bridgeVersion` state variable on the device page, taken from every reply including the status poll and a 500. |
+| `version` | The Bridge version, `"0.0.11"`, the same number `/health` has always reported. The Driver keeps it as the `bridgeVersion` state variable on the device page, taken from every reply including the status poll and a 500. |
 
 **Versions.** The Driver and the Bridge are versioned separately; each moves only when it changes.
 The Driver declares the oldest Bridge it can read (`0.0.9` for Driver 0.0.14, the first Bridge to
 send `version`) and compares the reported version with it numerically per dotted segment, so
-`0.0.10` is newer than `0.0.9`. A Bridge that is too old, or one from before 0.0.9 that sends no
+`0.0.11` is newer than `0.0.9`. A Bridge that is too old, or one from before 0.0.9 that sends no
 `version` at all, is shown in place on the device page as `0.0.8 (Driver needs 0.0.9 or later)` or
 `unknown (Driver needs 0.0.9 or later)`, with one warning in the hub log. A Bridge newer than the
 Driver is never flagged: the reply contract only ever gains fields, so a newer Bridge keeps working.
@@ -180,7 +180,7 @@ sweep writes `1 + sweep / 0.06` of the nine (six at `0.3`), a shorter move the s
 rounded, at least one. Either resolved to `0` snaps.
 A non-numeric, negative or above-60 `transition` or `sweep` gets a 400 and no write.
 | `GET /moonhalo/status` | none | Returns the remembered state, the Bridge version and the Monitor link; performs no DDC/CI call. |
-| `GET /health` | none | `{"ok": true, "version": "0.0.10", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
+| `GET /health` | none | `{"ok": true, "version": "0.0.11", "monitor": {...}}`, no allowlist check and no DDC/CI call, for a local liveness probe; the `monitor` object says whether the last DDC/CI call worked. |
 
 Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
 
@@ -196,7 +196,7 @@ Example: `GET /moonhalo/brightness/50` with the default colour step (4) replies
     "monitor": "BenQ RD280UG on \\\\.\\DISPLAY1"
   },
   "transition": {"seconds": 0.0, "steps": 1},
-  "version": "0.0.10",
+  "version": "0.0.11",
   "monitor": {"link": "ok", "error": null, "at": "2026-09-14T17:56:03-04:00"}
 }
 ```
@@ -207,7 +207,7 @@ The same command while the monitor is not answering replies with a 500:
 {
   "ok": false,
   "error": "BenQ RD280UG on \\\\.\\DISPLAY1 identified by EDID; DDC/CI not answering: SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "monitor": {
     "link": "failed",
     "error": "BenQ RD280UG on \\\\.\\DISPLAY1 identified by EDID; DDC/CI not answering: SetVCPFeature failed for VCP 0xD9 (Win32 error -1071241854 = 0xC0262582)",
@@ -230,7 +230,7 @@ curl "http://localhost:5000/moonhalo/brightness/100?transition=1.2"
 ```
 
 ```json
-{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}, "version": "0.0.10", "monitor": {"...": "..."}}
+{"ok": true, "state": {"...": "..."}, "transition": {"seconds": 1.2, "steps": 9}, "version": "0.0.11", "monitor": {"...": "..."}}
 ```
 
 The same move from step 1 with `sweep=0.9` (or `transition_seconds` 0.9 and no query) reports
@@ -326,7 +326,6 @@ Run these from the `Bridges/BenQ_MoonHalo` folder, with or without `--dry-run`:
 
 ```
 py -m moonhalo_bridge monitors
-py -m moonhalo_bridge capabilities
 py -m moonhalo_bridge read D9
 py -m moonhalo_bridge write D7 544
 py -m moonhalo_bridge --monitor DISPLAY2 read D9
@@ -346,28 +345,20 @@ monitor's own name. A display Windows has no EDID for prints `product=none name=
 With the RD280UG in standby the last line reads `selected: none (BenQ RD280UG (BNQ80BB) is not
 attached: asleep, off or unplugged; attached: BenQ PD2700U BNQ802E (\\.\DISPLAY2))`. `read <code>` reads a VCP register
 given as hex (`D9` or `0xD9`) and prints its current and maximum value. `write <code> <value>`
-writes a value (decimal or `0x`-hex) to a VCP register and reads it back to confirm. All four
+writes a value (decimal or `0x`-hex) to a VCP register and reads it back to confirm. All three
 act on the detected monitor (see **What the Bridge assumes**); `--monitor <selector>` before the
 command acts on a monitor by device name or description instead, the way `monitor_selector`
 does for `serve`, which is how to read another monitor's registers (the PD2700U's D9 answers
 `current=0 maximum=0`).
-
-`capabilities` reads the monitor's own DDC/CI capabilities string and prints it verbatim, then
-a blank line, then every VCP register it advertises, one per line in the monitor's own order,
-each formatted as a bare code (`  D9`) or a code with its advertised list of values
-(`  7E  (0F 11 13)`). Like `read`, it retries a transient failure up to three times, 50ms
-apart -- Microsoft documents both underlying calls as "usually returns quickly, but sometimes
-it can take several seconds to complete", and issue #28 saw exactly that on the RD280UG. The
-RD280UG's own capabilities string, the parsing grammar, and its full VCP register inventory are
-recorded in `docs/research/rd280ug-capabilities.md`; `--dry-run` pre-loads that exact string so
-`capabilities` has something real to parse with no hardware attached.
 
 **Caution: `write` changes the monitor immediately, with no confirmation prompt.** Only the
 values verified on the RD280UG on 2026-09-03 are known-good: `write D7 544` (0x0220, on at 360
 degrees), `write D7 528` (0x0210, off), and `write D9 <value>` with `<value>` packed as
 `(colour_step << 8) | brightness_step` for colour step 1-7 and brightness step 1-10 (for
 example `write D9 1029` for colour step 4, brightness step 5). Do not write other VCP codes or
-other D7/D9 values without first confirming them by hand.
+other D7/D9 values without first confirming them by hand; the RD280UG's full VCP register
+inventory, from its own DDC/CI capabilities string, is recorded in
+`docs/research/rd280ug-capabilities.md`.
 
 ## Running at logon (recommended)
 
@@ -511,7 +502,7 @@ Adjust `localport` and `remoteip` if your Bridge port or subnet differ from the 
 | `bridge.log` shows `announcement of ... failed: HTTPError: HTTP Error 401` (or 404 / 500) | The Maker API rejected the call. 401 or 403: the token is wrong or **Allow Access via Local IP Address** is off. 404 or 500: the app id or device id is wrong, or the MoonHalo device is not selected in the Maker API app, or the Driver on the Hub is older than 0.0.8 and has no `setBridgeAddress` command. |
 | `bridge.log` shows `announcement of ... failed: URLError` | The Hub did not answer at `hub_ip`. Check the address and that the Hub is up; the Bridge retries every `announce_seconds`. |
 | The device page shows `bridgeLink` offline although the Bridge answers `/health` | With the Maker values set, announcements have stopped reaching the Hub (see the two rows above). Without them, the announcement timeout never fires: the status poll alone decides. |
-| The device page shows `monitorLink` failed with `BenQ RD280UG on \\.\DISPLAYn identified by EDID; DDC/CI not answering: ... (Win32 error -1071241854 = 0xC0262582)` (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails the same way, and `/health` is fine | The RD280UG is attached and Windows knows which monitor it is, but its DDC/CI link is stuck while the Bridge itself is healthy: the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads, writes and the capabilities request all fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) power-cycle the monitor at its button, or unplug and replug its cable -- Windows then takes the monitor as newly plugged in, which is what cleared it on 2026-09-16 at 22:19:53; (2) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. No task restart is needed: the next command after the link is back sets `monitorLink` ok. `lastMonitorError` and `lastMonitorErrorAt` on the device page hold the last error and its time, kept across recovery. |
+| The device page shows `monitorLink` failed with `BenQ RD280UG on \\.\DISPLAYn identified by EDID; DDC/CI not answering: ... (Win32 error -1071241854 = 0xC0262582)` (on Driver 0.0.11 and earlier: `Bridge offline (... INTERNAL SERVER ERROR)` alternating with `Bridge online` in the hub log), every write in `bridge.log` fails the same way, and `/health` is fine | The RD280UG is attached and Windows knows which monitor it is, but its DDC/CI link is stuck while the Bridge itself is healthy: the error is `ERROR_GRAPHICS_I2C_ERROR_TRANSMITTING_DATA` (0xC0262582) and reads and writes fail alike. The Bridge cannot tell a stuck HDMI/I2C link from DDC/CI switched off in the OSD, so check in this order: (1) power-cycle the monitor at its button, or unplug and replug its cable -- Windows then takes the monitor as newly plugged in, which is what cleared it on 2026-09-16 at 22:19:53; (2) a real **Restart** from Start > Power > Restart, not a shutdown and start -- with Fast Startup on, shutdown does not reload the GPU driver, and this is what cleared it on 2026-09-14 after days of "starts" without a true boot; (3) the monitor's OSD DDC/CI setting; (4) roll back a recent GPU driver update. No task restart is needed: the next command after the link is back sets `monitorLink` ok. `lastMonitorError` and `lastMonitorErrorAt` on the device page hold the last error and its time, kept across recovery. |
 | The device page shows `monitorLink` failed with `BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: ...`, and `state.monitor` reads `unknown` | Windows does not list the RD280UG as part of the desktop. On this PC the monitor's own standby does that, so this is the normal reading while it sleeps; it also covers the monitor switched off at its button or unplugged, which the Bridge cannot tell apart. Nothing is written and the command gets a 500. The next command after the monitor is back finds it again with no task restart; the text lists what is attached (`no EDID (\\.\DISPLAYn)` for a display Windows has no identity for). If the RD280UG is awake and still listed as not attached, `py -m moonhalo_bridge monitors` shows what Windows has for each display; a `product` other than `BNQ80BB` on the RD280UG means `monitor_product` must be set to it. |
 | The halo does nothing while every link reads healthy: `bridgeLink online`, `monitorLink ok`, `switch on` on the device page, `ok` replies with the expected writes in `bridge.log` | The writes are reaching a monitor that is not the RD280UG. The Monitor link only says a monitor acknowledged the last DDC/CI call, and nothing in a DDC/CI write says which monitor. Check `state.monitor` in `/moonhalo/status` (`curl http://localhost:5000/moonhalo/status`): it should read `BenQ RD280UG on \\.\DISPLAYn`. Anything else means `monitor_selector` is set to the wrong monitor (clear it to `null` and restart the task, so detection picks the RD280UG by its EDID identity), or `monitor_product` names another monitor. `py -m moonhalo_bridge monitors` prints every monitor with its identity and the same selection with its rule. Bridge 0.0.7 and earlier selected the Windows primary display when `monitor_selector` was `null`, which is how this happened on 2026-09-16 after a second monitor was added. |
 | The service (or task) starts and requests return `ok` with the expected writes, but the halo does not visibly change | Most likely the session-0 caveat above: the process cannot actually reach the display even though the Windows API calls report success. Switch to the logon scheduled task. If that also does not change the halo, verify the same write works from an interactive `py -m moonhalo_bridge write D7 544` first. |

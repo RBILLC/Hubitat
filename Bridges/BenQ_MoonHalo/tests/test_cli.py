@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest import mock
 
 from moonhalo_bridge.cli import (
-    DRY_RUN_CAPABILITIES,
     build_parser,
     main,
     make_dry_run_port,
@@ -69,11 +68,14 @@ class TestBuildParser(unittest.TestCase):
         self.assertEqual(args.code, 0xD7)
         self.assertEqual(args.value, 544)
 
-    def test_parses_capabilities(self):
+    def test_the_commands_are_monitors_read_write_and_serve(self):
+        # The whole command set since Bridge 0.0.11 (issue #47 retired the
+        # diagnostic command that read the monitor's DDC/CI feature list).
         parser = build_parser()
-        args = parser.parse_args(["--dry-run", "capabilities"])
-        self.assertTrue(args.dry_run)
-        self.assertEqual(args.command, "capabilities")
+        self.assertIn("{monitors,read,write,serve}", parser.format_help())
+        with self.assertRaises(SystemExit):
+            with mock.patch("sys.stderr", new=io.StringIO()):
+                parser.parse_args(["--dry-run", "probe"])
 
     def test_parses_serve_with_no_config(self):
         # Argument parsing only: main() would block on app.run(), so it is
@@ -166,38 +168,6 @@ class TestDryRunRead(unittest.TestCase):
         out = io.StringIO()
         exit_code = main(["--dry-run", "read", "AB"], out=out)
         self.assertNotEqual(exit_code, 0)
-
-
-class TestDryRunCapabilities(unittest.TestCase):
-    def test_prints_raw_string_then_parsed_entries(self):
-        out = io.StringIO()
-        exit_code = main(["--dry-run", "capabilities"], out=out)
-        self.assertEqual(exit_code, 0)
-        output = out.getvalue()
-        self.assertIn(DRY_RUN_CAPABILITIES, output)
-        self.assertIn("  80  (00 01 02)", output)
-        self.assertIn("  80  (00 01 02 03)", output)
-        self.assertIn("  7E  (0F 11 13)", output)
-        self.assertIn("  D9", output)
-
-    def test_recovers_from_transient_capabilities_failures(self):
-        port = make_dry_run_port()
-        port.resolve_target()  # detection (issue #40) done; the failures below are the read's
-        port.fail_capabilities = 2  # fails twice, succeeds on the 3rd attempt
-        out = io.StringIO()
-        with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
-            exit_code = main(["--dry-run", "capabilities"], out=out)
-        self.assertEqual(exit_code, 0)
-        self.assertIn(DRY_RUN_CAPABILITIES, out.getvalue())
-
-    def test_exhausted_retries_report_error_and_exit_1(self):
-        port = make_dry_run_port()
-        port.resolve_target()  # detection (issue #40) done; the failures below are the read's
-        port.fail_capabilities = 3  # exceeds the retry budget
-        out = io.StringIO()
-        with mock.patch("moonhalo_bridge.cli.make_dry_run_port", return_value=port):
-            exit_code = main(["--dry-run", "capabilities"], out=out)
-        self.assertEqual(exit_code, 1)
 
 
 class TestDryRunWrite(unittest.TestCase):

@@ -50,9 +50,6 @@ KNOWN_PRODUCT_NAMES = {DEFAULT_MONITOR_PRODUCT: "BenQ RD280UG"}
 #: What `target_label` (and so `state.monitor`) reads before any
 #: resolution and after a miss.
 UNKNOWN_LABEL = "unknown"
-#: What a bare `FakeDdcPort()` advertises; `cli.DRY_RUN_CAPABILITIES` is
-#: the RD280UG's full string.
-DEFAULT_FAKE_CAPABILITIES = "(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))"
 #: `EnumDisplayDevices` flag: return the monitor's device interface path.
 EDD_GET_DEVICE_INTERFACE_NAME = 0x00000001
 
@@ -160,9 +157,8 @@ def _read_with_retries(
 ) -> T:
     """Call `read_once()` up to `retries` times, pausing `delay` seconds
     between attempts, and re-raise the last `DdcError` if every attempt
-    fails. Shared by every retried read -- VCP reads and capabilities
-    reads alike -- so the retry behaviour can be exercised through
-    `FakeDdcPort` in tests.
+    fails. `read_vcp` goes through here, so the retry behaviour can be
+    exercised through `FakeDdcPort` in tests.
     """
     last_error: Optional[DdcError] = None
     for attempt in range(retries):
@@ -180,9 +176,9 @@ class DdcPort(ABC):
     """Port to a monitor's DDC/CI interface.
 
     Subclasses provide `list_monitors` and the per-device primitives
-    (`_read_vcp_on`, `_write_vcp_on`, `_read_capabilities_on`); the public
-    `read_vcp`, `write_vcp` and `read_capabilities` resolve the target
-    monitor here first (see the module docstring), retrying reads.
+    (`_read_vcp_on`, `_write_vcp_on`); the public `read_vcp` and
+    `write_vcp` resolve the target monitor here first (see the module
+    docstring), retrying reads.
     """
 
     def __init__(
@@ -218,10 +214,6 @@ class DdcPort(ABC):
     @abstractmethod
     def _write_vcp_on(self, device_name: str, code: int, value: int) -> None:
         """Write `value` to `code` on that display."""
-
-    @abstractmethod
-    def _read_capabilities_on(self, device_name: str) -> str:
-        """One attempt at the raw capabilities string of that display."""
 
     # -- the target monitor ------------------------------------------------
 
@@ -371,23 +363,6 @@ class DdcPort(ABC):
         """Write `value` to the given VCP feature code on the target monitor."""
         self._on_target(lambda device: self._write_vcp_on(device, code, value))
 
-    def read_capabilities(self) -> str:
-        """Return the target monitor's raw DDC/CI capabilities string,
-        retrying a transient failure.
-
-        Microsoft documents both underlying calls as "usually returns
-        quickly, but sometimes it can take several seconds to complete";
-        issue #28 saw the first `GetCapabilitiesStringLength` call on the
-        RD280UG fail with `GetLastError()` -1071241845, with the retry
-        50ms later succeeding. So this goes through the same three-attempt
-        retry as `read_vcp`.
-        """
-        return self._on_target(
-            lambda device: _read_with_retries(
-                lambda: self._read_capabilities_on(device), self._retries, self._retry_delay
-            )
-        )
-
 
 class WindowsDdcPort(DdcPort):
     """Real DDC/CI port using the Windows Monitor Configuration API.
@@ -490,15 +465,6 @@ class WindowsDdcPort(DdcPort):
             ctypes.POINTER(wintypes.DWORD),
         ]
         self._dxva2.DestroyPhysicalMonitors.argtypes = [wintypes.DWORD, ctypes.POINTER(PHYSICAL_MONITOR)]
-        self._dxva2.GetCapabilitiesStringLength.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        self._dxva2.CapabilitiesRequestAndCapabilitiesReply.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_char_p,
-            wintypes.DWORD,
-        ]
 
     # -- monitor enumeration -------------------------------------------------
 
@@ -653,42 +619,17 @@ class WindowsDdcPort(DdcPort):
         finally:
             self._destroy(arr)
 
-    # -- capabilities -----------------------------------------------------
-
-    def _read_capabilities_on(self, device_name: str) -> str:
-        """`GetCapabilitiesStringLength` then
-        `CapabilitiesRequestAndCapabilitiesReply` on that display."""
-        ctypes = self._ctypes
-        wintypes = self._wintypes
-        arr = self._open_physical_monitor(device_name)
-        try:
-            handle = arr[0].hPhysicalMonitor
-            length = wintypes.DWORD()
-            if not self._dxva2.GetCapabilitiesStringLength(handle, ctypes.byref(length)):
-                raise DdcError("GetCapabilitiesStringLength failed", ctypes.get_last_error())
-            buffer = ctypes.create_string_buffer(length.value)
-            if not self._dxva2.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length.value):
-                raise DdcError(
-                    "CapabilitiesRequestAndCapabilitiesReply failed", ctypes.get_last_error()
-                )
-            # buffer.value stops at the first NUL, so the trailing
-            # terminator counted in `length` is already gone here.
-            return buffer.value.decode("latin-1")
-        finally:
-            self._destroy(arr)
-
 
 @dataclass
 class FakeMonitor:
     """One monitor of a `FakeDdcPort`: its identity plus its own
-    capabilities string, registers, scripted failures and writes.
+    registers, scripted failures and writes.
 
     `registers` maps VCP code -> `(current, maximum)`; a write updates it
     (preserving the maximum) so a following read reflects it. `fail_reads`
     maps VCP code -> a count of scripted read failures still owed; each
     read of that code consumes one before falling through to `registers`,
     which is how tests exercise the retry path without hardware.
-    `fail_capabilities` is the same counter for capabilities reads.
     `write_error` is a Win32 error code every write fails with (None
     writes normally), standing for a stuck DDC/CI link.
     `writes` records this monitor's `(code, value)` writes in order.
@@ -696,9 +637,7 @@ class FakeMonitor:
 
     info: MonitorInfo
     registers: dict[int, tuple[int, int]] = field(default_factory=dict)
-    capabilities: str = DEFAULT_FAKE_CAPABILITIES
     fail_reads: dict[int, int] = field(default_factory=dict)
-    fail_capabilities: int = 0
     write_error: Optional[int] = None
     writes: list[tuple[int, int]] = field(default_factory=list)
 
@@ -711,19 +650,17 @@ class FakeDdcPort(DdcPort):
     """In-memory DDC port for tests and `--dry-run`.
 
     `monitors` lists the attached monitors as `FakeMonitor`s, or as
-    `MonitorInfo`s that all get a copy of `registers` and `capabilities`;
-    the default is one primary "Generic PnP Monitor" with the RD280UG's
-    EDID identity that answers as the RD280UG. `fake_monitors` is that
-    list, editable between calls to stand for a cable swap. `writes`
-    records every `write_vcp` call port-wide as `(code, value)`, in the
-    order made; `monitor(device_name).writes` has the ones that reached
-    each monitor. `reads` records every VCP read attempt as `(device_name,
-    code)` and `capabilities_reads` every capabilities read attempt by
-    device name, so a test can show detection made none.
+    `MonitorInfo`s that all get a copy of `registers`; the default is one
+    primary "Generic PnP Monitor" with the RD280UG's EDID identity that
+    answers as the RD280UG. `fake_monitors` is that list, editable between
+    calls to stand for a cable swap. `writes` records every `write_vcp`
+    call port-wide as `(code, value)`, in the order made;
+    `monitor(device_name).writes` has the ones that reached each monitor.
+    `reads` records every VCP read attempt as `(device_name, code)`, so a
+    test can show detection made none.
 
-    `registers`, `capabilities`, `fail_reads` and `fail_capabilities` are
-    those of the first listed monitor, which is what a one-monitor test
-    means by "the monitor".
+    `registers` and `fail_reads` are those of the first listed monitor,
+    which is what a one-monitor test means by "the monitor".
     """
 
     def __init__(
@@ -732,7 +669,6 @@ class FakeDdcPort(DdcPort):
         registers: Optional[dict[int, tuple[int, int]]] = None,
         retries: int = DEFAULT_READ_RETRIES,
         retry_delay: float = 0.0,
-        capabilities: str = DEFAULT_FAKE_CAPABILITIES,
         monitor_selector: Optional[str] = None,
         monitor_product: str = DEFAULT_MONITOR_PRODUCT,
         logger: Optional[logging.Logger] = None,
@@ -743,12 +679,11 @@ class FakeDdcPort(DdcPort):
         self.fake_monitors: list[FakeMonitor] = [
             entry
             if isinstance(entry, FakeMonitor)
-            else FakeMonitor(entry, registers=dict(registers) if registers else {}, capabilities=capabilities)
+            else FakeMonitor(entry, registers=dict(registers) if registers else {})
             for entry in monitors
         ]
         self.writes: list[tuple[int, int]] = []
         self.reads: list[tuple[str, int]] = []
-        self.capabilities_reads: list[str] = []
 
     # -- the first monitor's state, for one-monitor tests ------------------
 
@@ -775,22 +710,6 @@ class FakeDdcPort(DdcPort):
     @fail_reads.setter
     def fail_reads(self, value: dict[int, int]) -> None:
         self._first.fail_reads = value
-
-    @property
-    def capabilities(self) -> str:
-        return self._first.capabilities
-
-    @capabilities.setter
-    def capabilities(self, value: str) -> None:
-        self._first.capabilities = value
-
-    @property
-    def fail_capabilities(self) -> int:
-        return self._first.fail_capabilities
-
-    @fail_capabilities.setter
-    def fail_capabilities(self, value: int) -> None:
-        self._first.fail_capabilities = value
 
     def monitor(self, device_name: str) -> FakeMonitor:
         """The attached FakeMonitor with that device name (KeyError if none)."""
@@ -829,11 +748,3 @@ class FakeDdcPort(DdcPort):
         monitor.writes.append((code, value))
         _, existing_max = monitor.registers.get(code, (value, value))
         monitor.registers[code] = (value, existing_max)
-
-    def _read_capabilities_on(self, device_name: str) -> str:
-        self.capabilities_reads.append(device_name)
-        monitor = self._attached(device_name)
-        if monitor.fail_capabilities > 0:
-            monitor.fail_capabilities -= 1
-            raise DdcError("simulated capabilities read failure")
-        return monitor.capabilities

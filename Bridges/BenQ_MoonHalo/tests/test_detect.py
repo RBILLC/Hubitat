@@ -19,8 +19,6 @@ DISPLAY1 = "\\\\.\\DISPLAY1"
 DISPLAY2 = "\\\\.\\DISPLAY2"
 DISPLAY3 = "\\\\.\\DISPLAY3"
 GENERIC = "Generic PnP Monitor"
-RD280UG_CAPS = "(prot(monitor)type(LCD)model(RD280UG)vcp(D7 D9))"
-PD2700U_CAPS = "(prot(monitor)type(LCD)model(PD2700U)vcp(10 12))"
 #: The RD280UG's D9 as read on 2026-09-16.
 RD280UG_D9 = (0x0101, 0x070A)
 #: The PD2700U's D9 as read the same day: it answers, with zeros.
@@ -38,7 +36,6 @@ def rd280ug(device_name: str, primary: bool = False, **identity) -> FakeMonitor:
     return FakeMonitor(
         MonitorInfo(device_name, primary, GENERIC, **{**RD280UG_IDENTITY, **identity}),
         registers={0xD9: RD280UG_D9, 0xD7: (0x0230, 0x0231)},
-        capabilities=RD280UG_CAPS,
     )
 
 
@@ -46,7 +43,6 @@ def pd2700u(device_name: str, primary: bool = False) -> FakeMonitor:
     return FakeMonitor(
         MonitorInfo(device_name, primary, GENERIC, **PD2700U_IDENTITY),
         registers={0xD9: PD2700U_D9},
-        capabilities=PD2700U_CAPS,
     )
 
 
@@ -59,16 +55,15 @@ class TestFakeDdcPortPerMonitor(unittest.TestCase):
     """FakeDdcPort holds one FakeMonitor per attached monitor; the old
     single-monitor attributes stand for the first one."""
 
-    def test_monitor_info_entries_get_the_shared_registers_and_capabilities(self):
+    def test_monitor_info_entries_get_the_shared_registers(self):
         infos = [
             MonitorInfo(DISPLAY1, True, GENERIC, **RD280UG_IDENTITY),
             MonitorInfo(DISPLAY2, False, GENERIC, **PD2700U_IDENTITY),
         ]
-        port = FakeDdcPort(monitors=infos, registers={0xD9: RD280UG_D9}, capabilities=RD280UG_CAPS)
+        port = FakeDdcPort(monitors=infos, registers={0xD9: RD280UG_D9})
         self.assertEqual(port.list_monitors(), infos)
         for device in (DISPLAY1, DISPLAY2):
             self.assertEqual(port.monitor(device).registers, {0xD9: RD280UG_D9})
-            self.assertEqual(port.monitor(device).capabilities, RD280UG_CAPS)
         # each monitor owns its own dict
         port.monitor(DISPLAY1).registers[0xD7] = (1, 1)
         self.assertNotIn(0xD7, port.monitor(DISPLAY2).registers)
@@ -77,11 +72,8 @@ class TestFakeDdcPortPerMonitor(unittest.TestCase):
         port = FakeDdcPort(monitors=[pd2700u(DISPLAY2, primary=True), rd280ug(DISPLAY1)])
         self.assertIs(port.registers, port.monitor(DISPLAY2).registers)
         self.assertIs(port.fail_reads, port.monitor(DISPLAY2).fail_reads)
-        self.assertEqual(port.capabilities, PD2700U_CAPS)
-        port.capabilities = RD280UG_CAPS
-        port.fail_capabilities = 2
-        self.assertEqual(port.monitor(DISPLAY2).capabilities, RD280UG_CAPS)
-        self.assertEqual(port.monitor(DISPLAY2).fail_capabilities, 2)
+        port.fail_reads[0xD9] = 2
+        self.assertEqual(port.monitor(DISPLAY2).fail_reads, {0xD9: 2})
 
     def test_the_default_monitor_carries_the_rd280ug_identity(self):
         # So a bare FakeDdcPort() (and --dry-run) is detected by edid like
@@ -142,12 +134,10 @@ class TestDetectionByEdid(unittest.TestCase):
 
     def test_no_ddc_ci_call_happens_during_detection(self):
         first, second = pd2700u(DISPLAY2, primary=True), rd280ug(DISPLAY1)
-        first.fail_capabilities = second.fail_capabilities = 99  # would fail if read
-        del second.registers[0xD9]  # and so would a D9 probe
+        del second.registers[0xD9]  # a D9 probe would fail
         port = FakeDdcPort(monitors=[first, second])
         self.assertEqual(port.resolve_target().device_name, DISPLAY1)
         self.assertEqual(port.reads, [])
-        self.assertEqual(port.capabilities_reads, [])
 
     def test_logs_one_line_naming_the_choice_rule_and_candidates(self):
         port = FakeDdcPort(monitors=[pd2700u(DISPLAY2, primary=True), rd280ug(DISPLAY1)])
@@ -205,8 +195,6 @@ class TestDetectionNotFound(unittest.TestCase):
         port = FakeDdcPort(monitors=[pd2700u(DISPLAY2, primary=True)])
         with self.assertRaises(DdcError):
             port.read_vcp(0xD9)
-        with self.assertRaises(DdcError):
-            port.read_capabilities()
 
     def test_a_display_with_no_edid_is_listed_as_no_edid(self):
         port = FakeDdcPort(monitors=[pd2700u(DISPLAY2, primary=True), no_edid(DISPLAY3)])
@@ -257,8 +245,8 @@ class TestDetectionNotFound(unittest.TestCase):
 class TestDetectionRuns(unittest.TestCase):
     """When detection runs: once per display set while found, again when
     the set of attached device names changes, and on every call after a
-    miss (no cooldown: a miss costs a registry read per monitor, not a
-    capabilities read)."""
+    miss (no cooldown: a miss costs a registry read per monitor, no
+    DDC/CI call)."""
 
     def test_same_display_set_is_not_detected_again(self):
         port = FakeDdcPort(monitors=[pd2700u(DISPLAY2, primary=True), rd280ug(DISPLAY1)])
@@ -379,13 +367,9 @@ class TestSelectorOverride(unittest.TestCase):
         self.assertEqual(detection.rule, "selector")
         self.assertEqual(detection.label, f"{GENERIC} on {DISPLAY1}")
         self.assertEqual(port.reads, [])
-        self.assertEqual(port.capabilities_reads, [])
 
     def test_selector_matches_description(self):
-        other = FakeMonitor(
-            MonitorInfo(DISPLAY2, True, "BenQ PD2700U", **PD2700U_IDENTITY),
-            capabilities=PD2700U_CAPS,
-        )
+        other = FakeMonitor(MonitorInfo(DISPLAY2, True, "BenQ PD2700U", **PD2700U_IDENTITY))
         port = FakeDdcPort(monitors=[other, rd280ug(DISPLAY1)], monitor_selector="pd2700")
         self.assertEqual(port.resolve_target().device_name, DISPLAY2)
 
