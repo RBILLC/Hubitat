@@ -160,6 +160,14 @@ row, "Letting the Hub find the Bridge"); `CONTEXT.md` gains **Pacing** and "dura
 362 tests pass. Left to the user: import 0.0.15, save once, check the renamed preferences hold their
 retyped values and the old settings and state keys are gone; then close #41 and bump to 1.0.0.
 
+Status 2026-10-08 afternoon: #41 CLOSED after the hub check (commit a59a307 pushed; the raw import URL
+served the CDN-cached 0.0.14 for minutes after the push, so the Driver was pasted in). First save after
+the import showed the four defaults, the retyped values held on the next save; `lastMonitorError`/
+`lastMonitorErrorAt` carried the 2026-10-07 value, old keys gone; a save with debug on logged no
+`could not remove setting` line. Step 2 is complete. Next: the 1.0.0 bump (Driver changelog line and
+Version line, Bridge `__version__`, README `/health` example; restart the task, re-import), then Steps
+3 to 5.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
