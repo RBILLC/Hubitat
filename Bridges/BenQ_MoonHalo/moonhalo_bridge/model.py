@@ -50,7 +50,7 @@ dark halo turning on (or taking a brightness/colour command) with a
 non-zero Transition writes D9 at the target colour and brightness step 1,
 then D7 on -- issue #29 showed a D9 write while off is applied and relights
 the halo at the new value with no flash on the following D7 write -- and
-then Ramps brightness up from there. `_halo_lit_locked` is what tells the
+then Ramps brightness up from there. `_resolve_lit_locked` is what tells the
 two ends of this apart from "off and dark": while a power_off_after Ramp
 is still running, Target power already reads "off" but the halo is still
 lit, so an on/brightness/colour command arriving mid dim-out must not
@@ -58,11 +58,31 @@ repeat the relight sequence (that would flash) -- it just retargets the
 Ramp upward and D7 off is never written; the mirror case, an off arriving
 mid ramp-up, retargets down to a fresh D7 off instead of restarting.
 
+Whether the halo is **Lit** (issue #46, CONTEXT.md) comes from the
+remembered state when it has one -- Target power "on", or a dim-out still
+in flight -- and the monitor is asked only when Target power is "unknown":
+one D7 read, dark when the low byte is 0x1x (`d7_is_dark`; the firmware's
+restore after a wake sets an undocumented bit 0, 0x0211 for dark and
+0x0221 for lit, measured in docs/research/rd280ug-d7-after-wake.md), lit
+for anything else or a failed read. Lit decides the whole move: a lit halo
+always dims out on an off and never gets the relight sequence on an on,
+since a D9 write while D7 is off relights the halo (issue #29) and a lit
+halo snapping dark is never acceptable. Target power is "off" from the
+moment a dim-out is planned (the reply says so, as it always has) but is
+unconfirmed until the worker writes D7 off; a dim-out that ends without
+that write (`_abort_power_off_locked`) makes it "unknown" and forgets the
+Applied state, so the next command reads D7 and starts from a fresh D9
+read. An off from a lit halo with no Ramp in flight reads D9 once first
+(`_probe_d9_locked`): a monitor that is not Attached fails the read, and
+the off is refused with that `DdcError` rather than planning a dim-out
+whose every write would be refused while the halo stays lit.
+
 The **Monitor link** (issue #39, CONTEXT.md) is the outcome of the last
 DDC/CI call the model made, whatever it was: `unknown` until the first
 call after start-up, `failed` with the `DdcError` text and time after any
 failure, `ok` after any success. Every port call -- command writes, Ramp
-writes on the worker thread, the D9 reads that resolve an unknown step --
+writes on the worker thread, the D9 reads that resolve an unknown step or
+probe before a dim-out, the D7 read that resolves an unknown power --
 goes through `_write_vcp_locked` / `_read_vcp_locked`, the one place it is
 recorded; `monitor_link` is what the HTTP layer puts in every reply.
 """
@@ -103,7 +123,10 @@ SWEEP_STEPS = 9
 class MoonHaloState:
     """Remembered MoonHalo state, persisted verbatim to the state file."""
 
-    power: str = "unknown"  # "on" | "off" | "auto" | "unknown"
+    #: "on" | "off" | "auto" | "unknown": unknown on a fresh state file and
+    #: after a dim-out that never wrote D7 off (issue #46), resolved by a
+    #: D7 read on the next command (`MoonHaloModel._resolve_lit_locked`).
+    power: str = "unknown"
     brightness_step: Optional[int] = None  # 1-10
     colortemp_step: Optional[int] = None  # 1-7
     last_level: Optional[int] = None  # 1-100
@@ -330,6 +353,24 @@ def pack_d9(colortemp_step: int, brightness_step: int) -> int:
     return ((colortemp_step & 0xFF) << 8) | (brightness_step & 0xFF)
 
 
+def _d9_half(current: int, *, is_high_byte: bool, value_max: int, default: int) -> int:
+    """One half of a D9 value read from the monitor as a hardware step:
+    the high byte (colour) or the low byte (brightness), clamped to
+    `1..value_max`, or `default` when that byte is 0 (unknown)."""
+    raw_byte = (current >> 8) & 0xFF if is_high_byte else current & 0xFF
+    if raw_byte == 0:
+        return default
+    return max(1, min(value_max, raw_byte))
+
+
+def d7_is_dark(value: int) -> bool:
+    """Whether a D7 read says the halo is dark: the low byte's high nibble
+    is 1 (`0x0210` as written, `0x0211` as the firmware restores it after
+    a wake). Anything else -- on `0x20`/`0x21`, auto `0x30`, or a value
+    never seen -- counts as lit (issue #46)."""
+    return (value & 0xF0) == 0x10
+
+
 class MoonHaloModel:
     """Owns remembered Target state, persists it to `config.state_file`, and
     performs the DDC writes for `turn_on` / `turn_off` / `set_colortemp`,
@@ -470,34 +511,50 @@ class MoonHaloModel:
         CONTEXT.md's Transition/Ramp/Sweep time glossary and issues #35
         and #37.
 
-        Not lit right now (`_halo_lit_locked` false: Target power not
-        "on", and no dim-out Ramp with `power_off_after` still in flight)
-        -- including the very first call on a freshly loaded model, whose
-        Target power is "unknown": write D7 off alone, a harmless re-sync,
-        regardless of `transition`.
+        The pacing resolving to 0: cancel any Ramp and snap straight to
+        D7 off, exactly as before #35 -- the caller's own ask, whatever
+        the halo is doing, so no D7 read is spent even with Target power
+        "unknown".
 
-        Lit, with the pacing resolving to 0: cancel any Ramp and snap
-        straight to D7 off, exactly as before #35.
+        Dark (`_resolve_lit_locked` false: Target power "off" and no dim-out
+        Ramp with `power_off_after` still in flight, or Target power
+        "unknown" and a D7 read saying dark): write D7 off alone, a
+        harmless re-sync, regardless of `transition`.
 
-        Otherwise (lit, non-zero pacing): Target power becomes "off"
-        at once -- `brightness_step`, `colortemp_step` and `last_level`
-        are left untouched, so `status` already reports level 0 and a
-        following `turn_on` restores the level -- and a Ramp is planned
-        from the Applied state down to brightness step 1, holding the
-        Applied colour step, with `power_off_after=True` so the worker's
-        true final write is D7 off (see `_RampPlan`/`_worker_loop`); this
-        is never collapsed to a synchronous write, even for a single D9
-        write or none at all (`_plan_power_off_ramp_locked`). A Ramp
-        already running -- up or down -- is replaced, continuing from
-        wherever the Applied state currently is: this is how an off
-        arriving mid ramp-up retargets into a ramp-down ending in D7 off.
+        Otherwise (lit, non-zero pacing): with no Ramp in flight, D9 is
+        read once as a probe (`_probe_d9_locked`, issue #46) -- a monitor
+        that is not Attached, or a stuck link, fails it, and the `DdcError`
+        leaves here with the Target untouched, so the Hub's switch stays
+        on and the next off that gets through dims the halo out. Then
+        Target power
+        becomes "off" at once -- `brightness_step`, `colortemp_step` and
+        `last_level` are left untouched, so `status` already reports level
+        0 and a following `turn_on` restores the level -- and a Ramp is
+        planned from the Applied state down to brightness step 1, holding
+        the Applied colour step, with `power_off_after=True` so the
+        worker's true final write is D7 off (see `_RampPlan`/`_worker_loop`);
+        this is never collapsed to a synchronous write, even for a single
+        D9 write or none at all (`_plan_power_off_ramp_locked`). Until that
+        write lands the "off" is unconfirmed: a dim-out that ends without
+        it leaves Target power "unknown" (`_abort_power_off_locked`). A
+        Ramp already running -- up or down -- is replaced without a probe,
+        continuing from wherever the Applied state currently is: this is
+        how an off arriving mid ramp-up retargets into a ramp-down ending
+        in D7 off.
         """
         with self._lock:
+            # Cleared first so a refused off logs `writes=[]`, not the
+            # previous command's writes.
+            self.last_writes = []
             pacing = self._resolve_pacing(transition, sweep)
-            if not self._halo_lit_locked() or pacing.snaps:
-                self._cancel_ramp_locked()
-                return self._write_power_off_now_locked()
+            # The snap is decided before Lit is resolved: an explicit 0
+            # writes D7 off whatever the halo is doing, so it never spends
+            # a D7 read on the question.
+            if pacing.snaps or not self._resolve_lit_locked():
+                return self._snap_off_locked()
 
+            if self._ramp_plan is None:
+                self._probe_d9_locked()
             self._cancel_ramp_locked()
             applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
             applied_brightness_step = self._resolve_applied_brightness_step_locked()
@@ -505,7 +562,6 @@ class MoonHaloModel:
                 applied_colortemp_step, applied_brightness_step, pacing
             )
             self._state.power = "off"
-            self.last_writes = []
             self._save_state()
             self._condition.notify_all()
             return self._status_locked()
@@ -522,20 +578,66 @@ class MoonHaloModel:
             return Pacing.sweep(sweep)
         return Pacing.sweep(self._config.transition_seconds)
 
-    def _halo_lit_locked(self) -> bool:
-        """Whether the monitor is actually emitting light right now, as
-        opposed to "off and dark" (issue #35): Target power "on", or
-        Target power "off" while a dim-out Ramp (`power_off_after`) is
-        still in flight -- D7 off has not been written yet, so the halo is
-        still lit at whatever step that Ramp has reached. This is what
-        lets an on/brightness/colour command arriving mid dim-out retarget
-        upward without repeating the relight sequence (which would flash)
-        or ever writing D7 off, and what lets `turn_off` tell a genuinely
-        dark halo (skip the Ramp, just re-sync D7 off) apart from a lit
-        one. Caller holds `self._lock`."""
+    def _resolve_lit_locked(self) -> bool:
+        """Whether the halo is Lit -- giving light right now -- as opposed
+        to dark (issues #35, #46): Target power "on", or Target power "off"
+        while a dim-out Ramp (`power_off_after`) is still in flight -- D7
+        off has not been written yet, so the halo is still lit at whatever
+        step that Ramp has reached. Target power "unknown" (a fresh state
+        file, or a dim-out that never wrote D7 off) is the one case the
+        monitor is asked: one D7 read (`_read_lit_locked`). A confirmed
+        "off" is trusted: the firmware restores the last written state
+        across sleep and wake. This is what lets an on/brightness/colour
+        command arriving mid dim-out retarget upward without repeating the
+        relight sequence (which would flash) or ever writing D7 off, and
+        what lets `turn_off` tell a genuinely dark halo (skip the Ramp,
+        just re-sync D7 off) apart from a lit one. Caller holds
+        `self._lock`."""
         if self._state.power == "on":
             return True
-        return self._ramp_plan is not None and self._ramp_plan.power_off_after
+        if self._ramp_plan is not None and self._ramp_plan.power_off_after:
+            return True
+        if self._state.power == "unknown":
+            return self._read_lit_locked()
+        return False
+
+    def _read_lit_locked(self) -> bool:
+        """Resolve an unknown Target power from the monitor: one D7 read,
+        dark when `d7_is_dark`, lit otherwise. A failed read (the link
+        can be stuck for over a minute after a button wake) counts as
+        lit: a dark halo wrongly taken as lit costs an off a flash (its
+        D9 writes relight the halo on the way down, issue #29) and an on
+        its D7 on write (the D9 writes relight it anyway), while a lit
+        halo wrongly taken as dark would snap it, which is never
+        acceptable. Caller holds `self._lock`."""
+        try:
+            current, _maximum = self._read_vcp_locked(VCP_POWER)
+        except DdcError as error:
+            self._logger.warning(
+                "D7 read failed (%s): Target power unknown, taking the halo as lit", error
+            )
+            return True
+        dark = d7_is_dark(current)
+        self._logger.info(
+            "D7 read 0x%04X: Target power unknown, halo %s", current, "dark" if dark else "lit"
+        )
+        return not dark
+
+    def _snap_off_locked(self) -> dict[str, Any]:
+        """Cancel any Ramp and write D7 off alone (`_write_power_off_now_locked`).
+        When the Ramp cancelled was a dim-out and the write then fails,
+        D7 off has not landed at all while Target power says "off": that
+        is a dim-out ending without its final write, so Target power
+        becomes "unknown" (`_abort_power_off_locked`) before the error
+        leaves. Caller holds `self._lock`."""
+        dimming_out = self._ramp_plan is not None and self._ramp_plan.power_off_after
+        self._cancel_ramp_locked()
+        try:
+            return self._write_power_off_now_locked()
+        except DdcError:
+            if dimming_out:
+                self._abort_power_off_locked()
+            raise
 
     def _write_power_off_now_locked(self) -> dict[str, Any]:
         """Write D7 off alone: the snap path for an already-dark halo (a
@@ -548,6 +650,36 @@ class MoonHaloModel:
         self._state.power = "off"
         self._save_state()
         return self._status_locked()
+
+    def _probe_d9_locked(self) -> None:
+        """One D9 read before a dim-out is planned from a lit halo with no
+        Ramp in flight (issue #46). Its job is to fail: a monitor that is
+        not Attached (asleep at its own standby), or a stuck link, raises
+        the `DdcError` out of `turn_off` with the Target untouched -- the
+        HTTP layer answers 500 with the Monitor link failed and the Driver
+        leaves the Hub's switch on -- instead of a dim-out whose every
+        write is refused while the firmware relights the halo at wake and
+        the next off snaps it dark. Its value stands in for the Applied
+        state only when the Bridge has none -- nothing applied since
+        start-up, or forgotten by `_forget_applied_locked` -- and only for
+        the half that is missing; a known Applied step is still trusted,
+        since a register read right after a write can be stale (issue
+        #29). Caller holds `self._lock`."""
+        current, _maximum = self._read_vcp_locked(VCP_D9)
+        if self._applied_colortemp_step is None:
+            self._applied_colortemp_step = _d9_half(
+                current,
+                is_high_byte=True,
+                value_max=7,
+                default=self._config.default_colortemp_step,
+            )
+        if self._applied_brightness_step is None:
+            self._applied_brightness_step = _d9_half(
+                current,
+                is_high_byte=False,
+                value_max=10,
+                default=self._config.default_brightness_step,
+            )
 
     def set_level(
         self, level: int, transition: Optional[float] = None, sweep: Optional[float] = None
@@ -631,13 +763,15 @@ class MoonHaloModel:
           writes, and the reply reports the running Ramp's own Transition.
           (A command that changes either axis retargets the plan instead,
           and a pacing that snaps always snaps.)
-        - Lit already (`_halo_lit_locked`, issue #35) -- genuinely on, or
-          mid dim-out with D7 off not yet written -- retargets straight to
-          "on" with no D7 write at all: repeating the relight sequence
-          below would flash, and a genuinely-on halo needs no D7 write
-          anyway.
-        - Dark, with a pacing that snaps: today's D7-then-D9 snap,
-          unchanged since #29.
+        - Lit already (`_resolve_lit_locked`, issues #35 and #46) -- genuinely
+          on, mid dim-out with D7 off not yet written, or Target power
+          unknown with a D7 read saying lit (or failing) -- retargets
+          straight to "on" with no D7 write at all: repeating the relight
+          sequence below would flash, and a genuinely-on halo needs no D7
+          write anyway.
+        - Dark (Target power "off", or unknown with D7 reading dark), with
+          a pacing that snaps: today's D7-then-D9 snap, unchanged since
+          #29.
         - Dark, with a non-zero pacing (issue #35): D9 is
           written at the target colour step and brightness step 1, then
           D7 on -- issue #29 showed a D9 write while off is applied and
@@ -666,6 +800,11 @@ class MoonHaloModel:
           mid-brightness-Ramp both become one combined sequence of D9
           writes.
         """
+        # Lit first: with Target power unknown this is the D7 read, made
+        # before the D9 reads below so a fresh model asks "lit?" and then
+        # "what colour?". No Ramp can be in flight while power is unknown,
+        # so the same-target return below never throws that read away.
+        was_lit = self._resolve_lit_locked()
         target_colortemp_step = (
             new_colortemp_step
             if new_colortemp_step is not None
@@ -708,13 +847,13 @@ class MoonHaloModel:
             return self._status_locked()
 
         writes: list[tuple[int, int]] = []
-        was_lit = self._halo_lit_locked()
         self._cancel_ramp_locked()
 
         if was_lit:
-            # Genuinely on already, or mid dim-out (a power_off_after Ramp
-            # that has not yet written D7 off): issue #35's "no flash"
-            # case. Retarget straight to "on" with no D7 write.
+            # Genuinely on already, mid dim-out (a power_off_after Ramp
+            # that has not yet written D7 off), or unknown and read lit:
+            # issue #35's "no flash" case. Retarget straight to "on" with
+            # no D7 write.
             self._state.power = "on"
             applied_colortemp_step = self._resolve_applied_colortemp_step_locked()
             applied_brightness_step = self._resolve_applied_brightness_step_locked()
@@ -978,11 +1117,13 @@ class MoonHaloModel:
         (issue #35), once its D9 writes (zero or more) are done -- the
         plan's true final write (see `_RampPlan`), so it gets the same
         final-write retry as any other, by passing `vcp_code=VCP_POWER`
-        to `_perform_ramp_write_locked`. Whether it lands, or is
-        abandoned after the retry (already logged, and the Applied D9
-        state forgotten, by that method), the plan ends here either way:
-        this is only ever attempted once. Caller holds `self._lock` (via
-        `self._condition`)."""
+        to `_perform_ramp_write_locked`. Landing it confirms the "off"
+        Target power has reported since the plan was made; abandoned
+        after the retry (already logged, and the Applied D9 state
+        forgotten, by that method), the halo is still lit and Target
+        power becomes "unknown" (`_abort_power_off_locked`, issue #46).
+        The plan ends here either way: this is only ever attempted once.
+        Caller holds `self._lock` (via `self._condition`)."""
         if self._perform_ramp_write_locked(plan, POWER_OFF_VALUE, True, vcp_code=VCP_POWER):
             plan.performed.append((VCP_POWER, POWER_OFF_VALUE))
             elapsed = time.monotonic() - plan.start_time
@@ -993,8 +1134,29 @@ class MoonHaloModel:
                 plan.performed,
                 elapsed,
             )
+        else:
+            self._abort_power_off_locked()
         if self._ramp_plan is plan:
             self._ramp_plan = None
+
+    def _abort_power_off_locked(self) -> None:
+        """A dim-out ended without D7 off written -- its final write failed
+        twice, or the snap-off that replaced it failed -- so the halo is
+        still lit at whatever step it reached while Target power says
+        "off" (issue #46). Target power becomes "unknown", the value a
+        fresh state file has: the next on or off reads D7 to tell lit from
+        dark (`_resolve_lit_locked`), and the Applied state is forgotten so it
+        starts from a fresh D9 read. `status` then reports power unknown
+        with the remembered Level, the one visible change an abort makes;
+        replies during a dim-out that completes are untouched. Caller
+        holds `self._lock`."""
+        self._state.power = "unknown"
+        self._forget_applied_locked()
+        self._save_state()
+        self._logger.warning(
+            "power off unconfirmed: D7 off was not written, the halo is still lit; "
+            "Target power unknown until the next command reads D7"
+        )
 
     def _perform_ramp_write_locked(
         self, plan: _RampPlan, value: int, is_final: bool, vcp_code: int = VCP_D9
@@ -1059,10 +1221,11 @@ class MoonHaloModel:
     def _forget_applied_locked(self) -> None:
         """The Applied state is unknown: every `_applied_*` attribute is
         set to None. Called when a Ramp's final write fails even after its
-        retry, so the next Ramp resolves its starting step from a fresh D9
-        read (see `_resolve_applied_brightness_step_locked`) instead of
-        trusting a Target step the monitor may never have received.
-        Caller holds `self._lock`."""
+        retry, and when a dim-out aborts (`_abort_power_off_locked`), so
+        the next Ramp resolves its starting step from a fresh D9 read (see
+        `_resolve_applied_brightness_step_locked`, or the probe an off
+        makes, `_probe_d9_locked`) instead of trusting a Target step the
+        monitor may never have received. Caller holds `self._lock`."""
         self._applied_brightness_step = None
         self._applied_colortemp_step = None
 
@@ -1158,10 +1321,7 @@ class MoonHaloModel:
                 default,
             )
             return default
-        raw_byte = (current >> 8) & 0xFF if is_high_byte else current & 0xFF
-        if raw_byte == 0:
-            return default
-        return max(1, min(value_max, raw_byte))
+        return _d9_half(current, is_high_byte=is_high_byte, value_max=value_max, default=default)
 
     def status(self) -> dict[str, Any]:
         """Return the remembered state; performs no DDC call."""

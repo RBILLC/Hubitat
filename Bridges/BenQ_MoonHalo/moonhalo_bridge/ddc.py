@@ -97,6 +97,13 @@ DEFAULT_FAKE_MONITOR = MonitorInfo(
     serial="FAKE00000000",
 )
 
+#: What a bare `FakeDdcPort()` monitor can answer: D7 reading 0x0210, a
+#: halo that is dark as the RD280UG reports after D7 off, so a fresh model
+#: (Target power unknown) resolves it as dark the way it did before issue
+#: #46 made that a read. Nothing else is readable until a write or a test
+#: puts it there.
+DEFAULT_FAKE_REGISTERS: dict[int, tuple[int, int]] = {0xD7: (0x0210, 0x0231)}
+
 
 class DdcError(Exception):
     """A DDC/CI operation failed.
@@ -650,12 +657,14 @@ class FakeDdcPort(DdcPort):
     """In-memory DDC port for tests and `--dry-run`.
 
     `monitors` lists the attached monitors as `FakeMonitor`s, or as
-    `MonitorInfo`s that all get a copy of `registers`; the default is one
-    primary "Generic PnP Monitor" with the RD280UG's EDID identity that
-    answers as the RD280UG. `fake_monitors` is that list, editable between
-    calls to stand for a cable swap. `writes` records every `write_vcp`
-    call port-wide as `(code, value)`, in the order made;
-    `monitor(device_name).writes` has the ones that reached each monitor.
+    `MonitorInfo`s that all get a copy of `registers` (with none given,
+    `DEFAULT_FAKE_REGISTERS`: a dark halo and nothing else readable); the
+    default is one primary "Generic PnP Monitor" with the RD280UG's EDID
+    identity that answers as the RD280UG. `fake_monitors` is that list,
+    editable between calls to stand for a cable swap or a monitor asleep.
+    `writes` records every `write_vcp` call port-wide as `(code, value)`,
+    in the order made; `monitor(device_name).writes` has the ones that
+    reached each monitor.
     `reads` records every VCP read attempt as `(device_name, code)`, so a
     test can show detection made none.
 
@@ -679,7 +688,9 @@ class FakeDdcPort(DdcPort):
         self.fake_monitors: list[FakeMonitor] = [
             entry
             if isinstance(entry, FakeMonitor)
-            else FakeMonitor(entry, registers=dict(registers) if registers else {})
+            else FakeMonitor(
+                entry, registers=dict(registers if registers is not None else DEFAULT_FAKE_REGISTERS)
+            )
             for entry in monitors
         ]
         self.writes: list[tuple[int, int]] = []

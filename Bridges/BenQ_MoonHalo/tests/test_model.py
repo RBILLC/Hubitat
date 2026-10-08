@@ -26,6 +26,7 @@ from moonhalo_bridge.model import (
     Pacing,
     brightness_step_to_level,
     colortemp_step_to_kelvin,
+    d7_is_dark,
     kelvin_to_colortemp_step,
     level_to_brightness_step,
     pack_d9,
@@ -231,6 +232,23 @@ class TestPacingSchedule(unittest.TestCase):
         self.assertEqual(Pacing.total(0.6).schedule(0), (0, 0.6))
         self.assertTrue(Pacing.total(0).snaps)
         self.assertEqual(Pacing.total(0).schedule(9), (1, 0.0))
+
+
+class TestD7IsDark(unittest.TestCase):
+    """Issue #46: the lit-or-dark reading of a D7 value masks the low
+    byte's high nibble, `(value & 0xF0) == 0x10`, because the firmware's
+    restore after a wake sets an undocumented bit 0 (`0x0211` where the
+    Bridge wrote `0x0210`; docs/research/rd280ug-d7-after-wake.md)."""
+
+    def test_off_values_with_and_without_the_wake_bit_are_dark(self):
+        for value in (POWER_OFF_VALUE, 0x0211, 0x0010, 0x001F):
+            with self.subTest(value=hex(value)):
+                self.assertTrue(d7_is_dark(value))
+
+    def test_on_auto_and_unexpected_values_are_lit(self):
+        for value in (POWER_ON_VALUE, 0x0221, 0x0230, 0x0000, 0x0200):
+            with self.subTest(value=hex(value)):
+                self.assertFalse(d7_is_dark(value))
 
 
 class TestMoonHaloModelPower(unittest.TestCase):

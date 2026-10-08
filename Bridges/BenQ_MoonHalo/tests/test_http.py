@@ -1888,7 +1888,7 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
             MonitorInfo(
                 device_name, primary, cls.GENERIC, product="BNQ80BB", name="BenQ RD280UG", serial="EMS6T00258087"
             ),
-            registers={VCP_D9: (0x0101, 0x070A), VCP_POWER: (0x0230, 0x0231)},
+            registers={VCP_D9: (0x0101, 0x070A), VCP_POWER: (POWER_OFF_VALUE, 0x0231)},
         )
 
     @classmethod
@@ -1921,10 +1921,11 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
             [(VCP_POWER, POWER_ON_VALUE), (VCP_D9, pack_d9(1, 5))],  # colour step 1 read from its D9
         )
         self.assertEqual(self.port.monitor(self.DISPLAY2).writes, [])
-        # Detection made no DDC/CI call: the command's own D9 reads on the
-        # RD280UG are the only reads.
+        # Detection made no DDC/CI call: the command's own D7 read (Target
+        # power unknown, issue #46) and D9 reads on the RD280UG are the
+        # only reads.
         self.assertTrue(self.port.reads)
-        self.assertEqual(set(self.port.reads), {(self.DISPLAY1, VCP_D9)})
+        self.assertEqual(set(self.port.reads), {(self.DISPLAY1, VCP_POWER), (self.DISPLAY1, VCP_D9)})
         status = self.client.get("/moonhalo/status").get_json()
         self.assertEqual(status["state"]["monitor"], f"BenQ RD280UG on {self.DISPLAY1}")
 
@@ -1986,6 +1987,333 @@ class TestMonitorDetectionOverHttp(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["state"]["monitor"], f"{self.GENERIC} on {self.DISPLAY1}")
         self.assertEqual(len(self.port.monitor(self.DISPLAY1).writes), 2)
+
+
+class TestLitResolution(unittest.TestCase):
+    """Issue #46: an off must always dim out when the halo is Lit, whatever
+    the Bridge's bookkeeping says. Target power `unknown` is resolved by one
+    D7 read (low byte `0x1x` dark; anything else, or a failed read, Lit);
+    an off from a Lit halo with no Ramp in flight reads D9 once as a probe,
+    so one sent while the RD280UG is not Attached is refused with a 500 and
+    the Target is untouched; a dim-out whose D7 off never lands leaves
+    Target power `unknown` and the Applied state forgotten.
+    """
+
+    DISPLAY1 = "\\\\.\\DISPLAY1"
+    DISPLAY2 = "\\\\.\\DISPLAY2"
+    GENERIC = "Generic PnP Monitor"
+    NOT_ATTACHED = "BenQ RD280UG (BNQ80BB) is not attached: asleep, off or unplugged; attached: "
+    #: What the firmware's restore leaves in D7 after a wake (measured
+    #: 2026-10-08, docs/research/rd280ug-d7-after-wake.md): bit 0 set.
+    D7_RELIT = 0x0221
+    D7_RESTORED_DARK = 0x0211
+
+    @classmethod
+    def rd280ug(cls, d7: int, d9: int) -> FakeMonitor:
+        return FakeMonitor(
+            MonitorInfo(
+                cls.DISPLAY1, False, cls.GENERIC, product="BNQ80BB", name="BenQ RD280UG", serial="EMS6T00258087"
+            ),
+            registers={VCP_D9: (d9, 0x070A), VCP_POWER: (d7, 0x0231)},
+        )
+
+    @classmethod
+    def pd2700u(cls) -> FakeMonitor:
+        return FakeMonitor(
+            MonitorInfo(
+                cls.DISPLAY2, True, cls.GENERIC, product="BNQ802E", name="BenQ PD2700U", serial="ETSCL07402SL0"
+            ),
+            registers={VCP_D9: (0, 0)},
+        )
+
+    def build(self, monitors: list[FakeMonitor]) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.port = FakeDdcPort(monitors=monitors)
+        self.config = make_config(Path(self._tmp.name))
+        self.model = MoonHaloModel(self.port, self.config)
+        app = create_app(self.model, self.config)
+        app.testing = True
+        self.client = app.test_client()
+
+    def _lit_at_step_10(self) -> None:
+        """From a dark fresh model, turn the halo on at step 10 with
+        transition=0 (Target power on, Applied step 10 known), then clear
+        the setup writes and reads."""
+        response = self.client.get("/moonhalo/brightness/100?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["state"]["power"], "on")
+        self.port.writes.clear()
+        self.port.reads.clear()
+
+    def _status(self) -> dict:
+        return self.client.get("/moonhalo/status").get_json()
+
+    def _wait_for_power(self, power: str, deadline: float = 3.0) -> dict:
+        start = time.monotonic()
+        status = self._status()
+        while status["state"]["power"] != power and time.monotonic() - start < deadline:
+            time.sleep(0.01)
+            status = self._status()
+        return status
+
+    def test_off_while_not_attached_is_refused_and_the_next_off_dims_out(self):
+        # The #46 sequence of 2026-10-08 12:40. Colour step 4 comes from
+        # the D9 read the setup command makes.
+        self.build([self.pd2700u(), self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+
+        # The monitor sleeps: Windows drops it from the desktop.
+        asleep = self.port.fake_monitors.pop(1)
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 500)
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        expected = self.NOT_ATTACHED + f"BenQ PD2700U BNQ802E ({self.DISPLAY2})"
+        self.assertEqual(body["error"], expected)
+        self.assertEqual(body["monitor"]["link"], "failed")
+        self.assertEqual(self.port.writes, [])
+        status = self._status()
+        self.assertEqual(status["state"]["power"], "on")
+        self.assertEqual(status["state"]["level"], 100)
+        self.assertEqual(status["monitor"]["link"], "failed")
+        self.assertEqual(status["monitor"]["error"], expected)
+
+        # The monitor wakes; its firmware relights the halo at full and
+        # D7 reads 0x0221. The next off dims out from the fresh D9 step
+        # (10, the same as the Applied step), nine writes then D7 off --
+        # not the lone D7 off 0.0.11 wrote.
+        asleep.registers[VCP_POWER] = (self.D7_RELIT, 0x0231)
+        self.port.fake_monitors.append(asleep)
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "off")
+        self.assertEqual(body["state"]["level"], 0)
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 9})
+        self.assertEqual(body["monitor"]["link"], "ok")
+        writes = _wait_for_writes(self.port, 10)
+        self.assertEqual(
+            writes,
+            [(VCP_D9, pack_d9(4, step)) for step in range(9, 0, -1)] + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+
+    def test_dim_out_aborted_mid_ramp_leaves_power_unknown_and_the_next_off_dims_out_from_a_fresh_d9_read(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING") as logs:
+            response = self.client.get("/moonhalo/off?transition=0.6")
+            self.assertEqual(response.status_code, 200)
+            # Replies during a normal dim-out are what 0.0.11 returned.
+            body = response.get_json()
+            self.assertEqual(body["state"]["power"], "off")
+            self.assertEqual(body["state"]["level"], 0)
+            self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 9})
+            self.assertEqual(self._status()["state"]["power"], "off")
+            _wait_for_writes(self.port, 3)
+            # The cable goes mid-Ramp: every later write fails, the D7 off
+            # included, and the dim-out aborts without it.
+            asleep = self.port.fake_monitors.pop(0)
+            status = self._wait_for_power("unknown")
+
+        self.assertEqual(status["state"]["power"], "unknown")
+        self.assertEqual(status["state"]["level"], 100)  # the remembered Level
+        self.assertTrue(any("ramp aborted" in line for line in logs.output))
+        self.assertTrue(any("power off unconfirmed" in line for line in logs.output))
+        landed = list(self.port.writes)
+        self.assertGreaterEqual(len(landed), 3)
+        self.assertTrue(all(code == VCP_D9 for code, _ in landed))
+
+        # The monitor is back with the halo relit by its firmware; its D9
+        # reads step 6, which is neither where the Ramp got to nor the
+        # Target's step 10, so the dim-out below can only have started
+        # from this fresh read.
+        asleep.registers[VCP_POWER] = (self.D7_RELIT, 0x0231)
+        asleep.registers[VCP_D9] = (pack_d9(4, 6), 0x070A)
+        self.port.fake_monitors.append(asleep)
+        self.port.reads.clear()
+
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.6, "steps": 5})
+        # One D7 read resolved the unknown power, then the one D9 probe
+        # whose value stood in for the forgotten Applied state: no second
+        # D9 read.
+        self.assertEqual(self.port.reads, [(self.DISPLAY1, VCP_POWER), (self.DISPLAY1, VCP_D9)])
+        new_writes = _wait_for_writes(self.port, len(landed) + 6)[len(landed):]
+        self.assertEqual(
+            new_writes,
+            [(VCP_D9, pack_d9(4, step)) for step in range(5, 0, -1)] + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+
+    def test_unknown_power_with_d7_dark_snaps_off_and_relights_on(self):
+        for d7 in (self.D7_RESTORED_DARK, POWER_OFF_VALUE):
+            with self.subTest(d7=hex(d7)):
+                # A fresh model (Target power unknown) over a dark halo.
+                self.build([self.rd280ug(d7, pack_d9(4, 1))])
+                response = self.client.get("/moonhalo/off?transition=0.6")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["state"]["power"], "off")
+                self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 0})
+                self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+                self.assertEqual(self.port.reads, [(self.DISPLAY1, VCP_POWER)])  # no D9 probe
+
+                self.build([self.rd280ug(d7, pack_d9(4, 1))])
+                response = self.client.get("/moonhalo/on?level=100&transition=0.6")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["state"]["power"], "on")
+                self.assertEqual(response.get_json()["transition"], {"seconds": 0.6, "steps": 9})
+                writes = _wait_for_writes(self.port, 11)
+                self.assertEqual(writes[:2], [(VCP_D9, pack_d9(4, 1)), (VCP_POWER, POWER_ON_VALUE)])
+                self.assertEqual(writes[2:], [(VCP_D9, pack_d9(4, step)) for step in range(2, 11)])
+
+    def test_unknown_power_with_a_failed_d7_read_counts_as_lit_and_dims_out(self):
+        self.build([self.rd280ug(POWER_ON_VALUE, pack_d9(4, 10))])
+        self.port.fail_reads[VCP_POWER] = 3  # every retry of the D7 read fails
+
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING") as logs:
+            response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "off")
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 9})
+        self.assertTrue(any("D7 read failed" in line for line in logs.output))
+        # Three D7 attempts, then the D9 probe, whose value (step 10) is
+        # what the dim-out starts from since nothing was Applied yet.
+        self.assertEqual(
+            self.port.reads,
+            [(self.DISPLAY1, VCP_POWER)] * 3 + [(self.DISPLAY1, VCP_D9)],
+        )
+        writes = _wait_for_writes(self.port, 10)
+        self.assertEqual(
+            writes,
+            [(VCP_D9, pack_d9(4, step)) for step in range(9, 0, -1)] + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+
+    def test_on_from_unknown_power_with_d7_lit_ramps_from_the_fresh_d9_step_without_relighting(self):
+        self.build([self.rd280ug(self.D7_RELIT, pack_d9(3, 4))])
+        response = self.client.get("/moonhalo/on?level=100&transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(body["state"]["power"], "on")
+        self.assertEqual(body["state"]["level"], 100)
+        self.assertEqual(body["transition"], {"seconds": 0.6, "steps": 6})
+        writes = _wait_for_writes(self.port, 6)
+        # No D9 step-1 write and no D7 on: the halo is lit, so the relight
+        # sequence would be a visible dip. The Ramp rises from the read
+        # step 4 at the read colour 3.
+        self.assertEqual(writes, [(VCP_D9, pack_d9(3, step)) for step in range(5, 11)])
+
+    def test_off_after_a_completed_dim_out_writes_the_lone_d7_off(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+        self.assertEqual(self.client.get("/moonhalo/off?transition=0.6").status_code, 200)
+        _wait_for_writes(self.port, 10)
+        self.port.writes.clear()
+        self.port.reads.clear()
+
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 0})
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+        self.assertEqual(self.port.reads, [])  # a confirmed off is trusted: no D7 read, no probe
+
+    def test_explicit_transition_zero_off_snaps_without_a_probe(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+        response = self.client.get("/moonhalo/off?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 0})
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+        self.assertEqual(self.port.reads, [])
+
+    def test_off_from_a_lit_halo_with_a_known_applied_step_probes_d9_once_and_ignores_its_value(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+        # The register says step 3 (a stale read, issue #29); the Applied
+        # step of 10 is what the dim-out must start from.
+        self.port.registers[VCP_D9] = (pack_d9(4, 3), 0x070A)
+
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.6, "steps": 9})
+        self.assertEqual(self.port.reads, [(self.DISPLAY1, VCP_D9)])
+        writes = _wait_for_writes(self.port, 10)
+        self.assertEqual(
+            writes,
+            [(VCP_D9, pack_d9(4, step)) for step in range(9, 0, -1)] + [(VCP_POWER, POWER_OFF_VALUE)],
+        )
+
+    def test_replies_during_a_normal_dim_out_are_what_0_0_11_returned(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+        expected_state = {
+            "power": "off",
+            "level": 0,
+            "brightnessStep": 10,
+            "colorTempStep": 4,
+            "colorTemperature": colortemp_step_to_kelvin(4, 2700, 6500),
+            "monitor": f"BenQ RD280UG on {self.DISPLAY1}",
+        }
+
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertIsNotNone(body["monitor"].pop("at"))
+        self.assertEqual(
+            body,
+            {
+                "ok": True,
+                "state": expected_state,
+                "transition": {"seconds": 0.6, "steps": 9},
+                "version": __version__,
+                "monitor": {"link": "ok", "error": None},
+            },
+        )
+        status = self.client.get("/moonhalo/status").get_json()
+        self.assertIsNotNone(status["monitor"].pop("at"))
+        self.assertEqual(
+            status,
+            {"ok": True, "state": expected_state, "version": __version__, "monitor": {"link": "ok", "error": None}},
+        )
+        _wait_for_writes(self.port, 10)  # let the dim-out finish
+
+    def test_explicit_transition_zero_off_with_unknown_power_snaps_without_a_d7_read(self):
+        self.build([self.rd280ug(self.D7_RELIT, pack_d9(4, 10))])
+        response = self.client.get("/moonhalo/off?transition=0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["transition"], {"seconds": 0.0, "steps": 0})
+        self.assertEqual(self.port.writes, [(VCP_POWER, POWER_OFF_VALUE)])
+        self.assertEqual(self.port.reads, [])
+
+    def test_snap_off_that_fails_after_cancelling_a_dim_out_leaves_power_unknown(self):
+        self.build([self.rd280ug(POWER_OFF_VALUE, pack_d9(4, 1))])
+        self._lit_at_step_10()
+        self.assertEqual(self.client.get("/moonhalo/off?transition=2").status_code, 200)
+        _wait_for_writes(self.port, 1)
+        # The link sticks: the dim-out's remaining writes and the snap
+        # that replaces it all fail, so D7 off never lands.
+        self.port.fake_monitors[0].write_error = -1071241854
+        with self.assertLogs("moonhalo_bridge.model", level="WARNING") as logs:
+            response = self.client.get("/moonhalo/off?transition=0")
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(self._status()["state"]["power"], "unknown")
+        self.assertTrue(any("power off unconfirmed" in line for line in logs.output))
+
+        # The link is back: the next off resolves the unknown power from
+        # D7 (still on, as last written) and dims out from a fresh D9 read.
+        self.port.fake_monitors[0].write_error = None
+        self.port.writes.clear()
+        self.port.reads.clear()
+        response = self.client.get("/moonhalo/off?transition=0.6")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.port.reads, [(self.DISPLAY1, VCP_POWER), (self.DISPLAY1, VCP_D9)])
+        steps = response.get_json()["transition"]["steps"]
+        writes = _wait_for_writes(self.port, steps + 1)
+        self.assertEqual(writes[-1], (VCP_POWER, POWER_OFF_VALUE))
+        self.assertTrue(all(code == VCP_D9 for code, _ in writes[:-1]))
+
 
 if __name__ == "__main__":
     unittest.main()
