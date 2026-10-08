@@ -168,6 +168,16 @@ the import showed the four defaults, the retyped values held on the next save; `
 Version line, Bridge `__version__`, README `/health` example; restart the task, re-import), then Steps
 3 to 5.
 
+Status 2026-10-08 late (Step 2, #47, added by the `/codebase-design` pass): Bridge 0.0.11 implemented on
+main as 111ca9f (`/implement`, Bridge-only, Driver stays 0.0.15 with minimum Bridge 0.0.9). The DDC/CI
+capabilities-string path is gone: `capabilities.py` and its tests, `DdcPort.read_capabilities` with the
+Windows and fake primitives, the fake's capabilities knobs, the `capabilities` command; the port is two
+primitives again and the serving path is untouched. README: command-line mode lists `monitors`, `read`,
+`write`; one pointer at `docs/research/rd280ug-capabilities.md`; the 0xC0262582 row says reads and
+writes fail alike; version examples 0.0.11. 342 tests pass (362 minus the 21 deleted plus one parser
+test). Left to the user: restart the task on 0.0.11, `py -m moonhalo_bridge monitors` still selects
+`by edid`, the hub shows `Bridge version 0.0.11` with no warning; then close #47 and bump to 1.0.0.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
