@@ -227,6 +227,16 @@ Later still: the changelog squash moved INTO #49 (decision 5: 0.0.0 to 0.0.16 co
 under 0.0.17; the Google Home typing lesson must be in the research note). The version stays 0.0.17; the user wants a
 final verification before the 1.0.0 bump, which remains under #38.
 
+Status 2026-10-08 night (#49): Driver 0.0.17 implemented on main as f59eb67 (`/implement`, Driver-only, comments
+only; Bridge stays 0.0.12, minimum Bridge 0.0.9) and pushed. Header: License line after the Import URL, `Behavior:`
+label on the notes, State bullet gone, contract pointer and transition note reworded, doubled blank line in the
+metadata block closed, changelog squashed to the 0.0.17 line plus one pre-release line for 0.0.0 to 0.0.16.
+LICENSE.txt names Rothenberg Industries, LLC. The 0.0.1 to 0.0.6 Google Home acceptance lesson was NOT in
+`docs/research/google-home-colour-temperature.md`; it is now a paragraph there (British spelling, like the file).
+`/code-review`: Standards clean; Spec found two sentences in the research paragraph to tighten (fixed in the next commit), and called the squashed line's 21-space continuation indent a defensible but not literal "wrapped like the other entries" (kept, it matches the 0.0.17 entry). Thirteen boxes ticked on #49; left to the user: import 0.0.17 from the raw URL (it lags
+the push by minutes), save once, `refresh()` still works, then close #49. Nothing else queued. 1.0.0 stays PARKED;
+the final verification before the bump remains under #38. #45, #26 later.
+
 - Driver comments: the user wants them terse, like classic Hubitat drivers (one or two lines per method,
   short header bullets). The 0.0.10 and 0.0.11 comments are; the older header "Behaviour" bullets and the
   `on()`, `setBridgeAddress`, announcement and purge comments are still long. Move anything worth keeping
