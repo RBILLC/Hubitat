@@ -271,7 +271,7 @@ section in, testers invited; the user also posts on X and writes a website page 
 gets George Gilman's 2025 line back above the LLC line (the Tuya driver is his, a fork carried alongside). Tickets:
 [#50](https://github.com/RBILLC/Hubitat/issues/50) release preparation (README, metadata, device-page screenshot, post and
 release-notes drafts, `docs/release-checklist.md`, LICENSE holders) and [#51](https://github.com/RBILLC/Hubitat/issues/51)
-the 1.0.0 bump, blocked by #50 and by the user's checklist pass. Sequence: #50 (agent), pictures and website (user),
+the 1.0.0 bump, blocked by #50 alone: the user's verification sign-off (the 22-step procedure, in the ticket) is #50's last acceptance box, so #50 closes only after the checklist passes. Sequence: #50 (agent), pictures and website (user),
 checklist (user), #51 (agent), then tag v1.0.0, GitHub Release, forum post, X (user). QUEUED: /clear, /implement #50.
 
 ## Step 3: Hubitat community post
