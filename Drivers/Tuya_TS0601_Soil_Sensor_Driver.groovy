@@ -3,6 +3,7 @@
  *
  * Author: George Gilman (ggilman@gmail.com)
  * Date: 2025-05-24
+ * License: MIT, see https://github.com/RBILLC/Hubitat/blob/main/LICENSE.txt
  *
  * This driver parses data from the specific Tuya TS0601 soil moisture sensor,
  * focusing on interpreting the proprietary Tuya EF00 cluster.

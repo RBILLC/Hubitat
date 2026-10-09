@@ -277,6 +277,22 @@ Added 2026-10-09 morning: #49 CLOSED (0.0.17 on the hub); hub is a C-7 on platfo
 [#52](https://github.com/RBILLC/Hubitat/issues/52) (ready-for-human) a Google Home setup guide with the user's mobile
 screenshots, walked through in its own session, optional room-sync video linked from the post; #51 is blocked by #50 and #52.
 
+Status 2026-10-09 midday (#50): release preparation implemented on main (`/implement`, docs and comments only; Driver
+stays 0.0.17, Bridge 0.0.12, 355 tests pass). Root README rewritten as the landing page in the twelve-section order;
+repo description and the five topics set; `docs/images/device-page.png` captured with headless Chrome (the command is
+in `docs/images/README.md`) and three generated placeholders under the final file names (`moonhalo-lit.jpg`,
+`google-home-device-card.png`, `google-home-community-device-type.png`), which the user overwrites; drafts
+`docs/forum/moonhalo-release-post.md` and `docs/forum/moonhalo-v1.0.0-release-notes.md`; `docs/release-checklist.md`
+(22 lines, sign-off block); LICENSE.txt with George Gilman's 2025 line above the LLC line and a License line in the Tuya
+header. `/code-review` findings applied. Found while checking the checklist against the code: `level` shows the Level as
+commanded (not the hardware step) and 0 while off, so line 11 proves "level kept" with a second On; after a Bridge start
+`monitorLink` reads `unknown` until a command writes to the monitor, and after an outage it leaves `unreachable` only at
+the next poll, so the agreed line 17 ("within a minute online and ok") cannot pass as worded and is a third open point
+in the checklist. The docs say two VCP registers (D7 power, D9 brightness and colour), where the ticket said one.
+Still placeholders, grep `PLACEHOLDER-`: the forum thread URL and website URL (README Support, release notes), the
+website URL and release date (post). `docs/google-home-setup.md` is linked and does not exist until #52. Left to the
+user: the three pictures, the website page, the checklist run and its sign-off (the last box of #50). Then #52, then #51.
+
 ## Step 3: Hubitat community post
 
 - Draft it in `docs/forum/` like the existing `google-home-colorsetting-request.md` (status line, suggested
