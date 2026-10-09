@@ -4,8 +4,13 @@ Control the MoonHalo backlight of a BenQ RD280UG monitor from Hubitat and Google
 
 ## What it is
 
-The MoonHalo is the LED backlight on the rear of the BenQ RD280UG monitor. BenQ MoonHalo Bridge
-exposes it to a Hubitat Elevation hub as a dimmable, color-temperature light. It has two parts:
+The MoonHalo is the LED backlight on the rear of the BenQ RD280UG monitor. BenQ provides two ways
+to control it: the Function Bar on the monitor and the Display Pilot 2 desktop application. BenQ
+documents no smart-home integration for it, so it cannot be added to Google Home as a light or
+driven by home automation rules.
+
+BenQ MoonHalo Bridge exposes the MoonHalo to a Hubitat Elevation hub as a dimmable,
+color-temperature light. It has two parts:
 
 - **Driver**: one Groovy file, installed on the Hub.
 - **Bridge**: a Python service, installed on the Windows PC the monitor is connected to.
