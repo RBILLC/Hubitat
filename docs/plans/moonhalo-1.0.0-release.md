@@ -6,7 +6,7 @@ session can pick this up without the conversation that produced it. Update it as
 ## Where things stand (2026-09-08, 23:30)
 
 - The MoonHalo effort under map #1 is complete: specs #13 and #30 and tickets #31-#37 are closed, and
-  `feature/benq-moonhalo` was merged to `main` as 6718af7. `main` is the branch to work on now.
+  `feature/benq-moonhalo` was merged to `main` as fff34d0. `main` is the branch to work on now.
 - On the hub: Driver **0.0.11** (importUrl serves it from `main`), preference **Default transition (ms)**
   at its default 300. On the PC: Bridge **0.0.6** running from the `MoonHaloBridge` logon scheduled
   task with `config.json` `transition_seconds` 0.3; the Bridge announces 192.168.86.115:5000 to the hub
@@ -62,7 +62,7 @@ live config's `monitor_selector` workaround was set back to `null` and the task 
 passed the same evening (hub command moves the halo; cable unplugged gives `monitorLink failed`
 naming the missing model, plugged back in recovers with no restart); the check found and fixed a
 30 s miss cooldown (each miss cost a 2.8 s capabilities read and detection ran on every call, which
-outlasted the Driver's request timeout). Shipped as 443c791, #40 closed. Step 1b done.
+outlasted the Driver's request timeout). Shipped as c30d3a5, #40 closed. Step 1b done.
 Related facts recorded in `docs/research/rd280ug-d6-power-mode.md`: the RD280UG's button standby is
 invisible to DDC/CI (writes succeed, D6 reads 0x60 on and off), so no `standby` value is possible.
 
@@ -76,7 +76,7 @@ then [#41](https://github.com/RBILLC/Hubitat/issues/41) (Driver 0.0.15 since #43
 detection glossary entry for #40's rule names), blocked by #42 on GitHub. The 1.0.0 bump is a separate
 step after the review pass.
 
-Status 2026-09-16 night: #42 shipped as 4118c84 (Driver 0.0.13) and closed after the hub check passed
+Status 2026-09-16 night: #42 shipped as d817511 (Driver 0.0.13) and closed after the hub check passed
 (task stopped: `bridgeLink offline` and `monitorLink unreachable` together; task started: restored on
 the next poll). The check raised two points, decided the same evening:
 
@@ -90,7 +90,7 @@ the next poll). The check raised two points, decided the same evening:
 - The `monitorLinkError`/`monitorLinkErrorAt` state is history by design (kept across recovery) and
   stays; the names are the problem, so #41 renames them to `lastMonitorError`/`lastMonitorErrorAt`.
 
-Status 2026-09-16 late night: #43 shipped as 9e9a518 (Bridge 0.0.9 / Driver 0.0.14) and closed after
+Status 2026-09-16 late night: #43 shipped as bc3bb25 (Bridge 0.0.9 / Driver 0.0.14) and closed after
 the hub check passed (Driver 0.0.14 against Bridge 0.0.8 showed `unknown (Driver needs 0.0.9 or later)`
 with one warning; the task restarted on 0.0.9 showed `0.0.9` with one info line within a poll; stop and
 start of the task left it at `0.0.9`). During the check the RD280UG's DDC/CI link stuck after a cable
@@ -160,7 +160,7 @@ row, "Letting the Hub find the Bridge"); `CONTEXT.md` gains **Pacing** and "dura
 362 tests pass. Left to the user: import 0.0.15, save once, check the renamed preferences hold their
 retyped values and the old settings and state keys are gone; then close #41 and bump to 1.0.0.
 
-Status 2026-10-08 afternoon: #41 CLOSED after the hub check (commit a59a307 pushed; the raw import URL
+Status 2026-10-08 afternoon: #41 CLOSED after the hub check (commit 5b7ba56 pushed; the raw import URL
 served the CDN-cached 0.0.14 for minutes after the push, so the Driver was pasted in). First save after
 the import showed the four defaults, the retyped values held on the next save; `lastMonitorError`/
 `lastMonitorErrorAt` carried the 2026-10-07 value, old keys gone; a save with debug on logged no
@@ -169,7 +169,7 @@ Version line, Bridge `__version__`, README `/health` example; restart the task, 
 3 to 5.
 
 Status 2026-10-08 late (Step 2, #47, added by the `/codebase-design` pass): Bridge 0.0.11 implemented on
-main as 111ca9f (`/implement`, Bridge-only, Driver stays 0.0.15 with minimum Bridge 0.0.9). The DDC/CI
+main as 198cc3e (`/implement`, Bridge-only, Driver stays 0.0.15 with minimum Bridge 0.0.9). The DDC/CI
 capabilities-string path is gone: `capabilities.py` and its tests, `DdcPort.read_capabilities` with the
 Windows and fake primitives, the fake's capabilities knobs, the `capabilities` command; the port is two
 primitives again and the serving path is untouched. README: command-line mode lists `monitors`, `read`,
@@ -180,7 +180,7 @@ test). Left to the user: restart the task on 0.0.11, `py -m moonhalo_bridge moni
 
 Status 2026-10-08 night: #47 CLOSED after the PC check. The task restarted on 0.0.11 at 15:15 (`schtasks /end` then `/run`): `/health` reported 0.0.11, `monitors` selected `BenQ RD280UG on \\.\DISPLAY1 (by edid)`, `bridge.log` showed detection by edid and the announcement; the hub logged `Bridge version 0.0.11` once at 15:17:02 and the device page showed it after a reload (the State Variables block is a page-load snapshot, not live). `/code-review` found nothing to fix. The 1.0.0 bump is PARKED by the user until they say so; nothing is queued. #45, #46, #26 later.
 
-Status 2026-10-08 night (#46): Bridge 0.0.12 implemented on main as 785df2e (`/implement`, Bridge-only, Driver
+Status 2026-10-08 night (#46): Bridge 0.0.12 implemented on main as f3c7b5e (`/implement`, Bridge-only, Driver
 stays 0.0.15). Target power `unknown` is resolved by one D7 read (low byte `0x1x` dark; anything else, or a
 failed read, lit); an off from a lit halo with no Ramp in flight probes D9 first, so one sent while the monitor
 sleeps (or the link is stuck) is refused with a 500 and the switch stays on; a dim-out whose D7 off never lands
@@ -202,7 +202,7 @@ never reached the Bridge, cause on the hub side not established) and a confirmed
 both covered by tests only, the closing comment says so. 1.0.0 stays PARKED; nothing is queued. #45, #26 later.
 
 Status 2026-10-08 evening, later (#48, from a preference audit the user asked for): Driver 0.0.16 implemented on
-main as 0e9fd96 (`warmKelvin`/`coolKelvin` dropped and removed on save, the Bridge owns the Kelvin range;
+main as 3423110 (`warmKelvin`/`coolKelvin` dropped and removed on save, the Bridge owns the Kelvin range;
 every preference described, `(initial)` gone from the address titles; the Driver file and the root README
 American throughout, the Bridge README and CONTEXT.md unchanged). Five boxes ticked; left to the user: import
 0.0.16, save once, no Kelvin preferences on the device page, `setColorTemperature(3000)` still works; then close
@@ -227,7 +227,7 @@ Later still: the changelog squash moved INTO #49 (decision 5: 0.0.0 to 0.0.16 co
 under 0.0.17; the Google Home typing lesson must be in the research note). The version stays 0.0.17; the user wants a
 final verification before the 1.0.0 bump, which remains under #38.
 
-Status 2026-10-08 night (#49): Driver 0.0.17 implemented on main as f59eb67 (`/implement`, Driver-only, comments
+Status 2026-10-08 night (#49): Driver 0.0.17 implemented on main as 33db814 (`/implement`, Driver-only, comments
 only; Bridge stays 0.0.12, minimum Bridge 0.0.9) and pushed. Header: License line after the Import URL, `Behavior:`
 label on the notes, State bullet gone, contract pointer and transition note reworded, doubled blank line in the
 metadata block closed, changelog squashed to the 0.0.17 line plus one pre-release line for 0.0.0 to 0.0.16.
