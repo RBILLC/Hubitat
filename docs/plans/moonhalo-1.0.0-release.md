@@ -273,6 +273,9 @@ gets George Gilman's 2025 line back above the LLC line (the Tuya driver is his, 
 release-notes drafts, `docs/release-checklist.md`, LICENSE holders) and [#51](https://github.com/RBILLC/Hubitat/issues/51)
 the 1.0.0 bump, blocked by #50 alone: the user's verification sign-off (the 22-step procedure, in the ticket) is #50's last acceptance box, so #50 closes only after the checklist passes. Sequence: #50 (agent), pictures and website (user),
 checklist (user), #51 (agent), then tag v1.0.0, GitHub Release, forum post, X (user). QUEUED: /clear, /implement #50.
+Added 2026-10-09 morning: #49 CLOSED (0.0.17 on the hub); hub is a C-7 on platform 2.4.3.177 (in #50 Requirements);
+[#52](https://github.com/RBILLC/Hubitat/issues/52) (ready-for-human) a Google Home setup guide with the user's mobile
+screenshots, walked through in its own session, optional room-sync video linked from the post; #51 is blocked by #50 and #52.
 
 ## Step 3: Hubitat community post
 
